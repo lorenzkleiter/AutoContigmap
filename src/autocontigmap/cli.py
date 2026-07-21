@@ -40,7 +40,25 @@ is omitted from the contig entirely rather than printed as a literal "0".
 If a gap's estimated Cα-Cα distance is beyond the 95th percentile of gap
 sizes seen in the checkpoint data for this res_min-res_max range, a warning
 is printed to stderr -- the estimate is based on thin data out there, and a
-larger design is probably necessary.
+larger design is probably necessary. If the requested res_min/res_max range
+can't fit the motif and its gaps at all, that's a hard error (or, if it's
+merely too tight, a warning) -- see "Length-range validation" below.
+
+Diagnostics (stderr)
+---------------------
+Every run starts with what it found ("Chains found: ...", then how the
+motif was identified), before any gap processing. All diagnostic lines use
+the same two-space indent and "Warning: ..." phrasing; a blank line follows
+the per-gap listing before any length-range warning. Hard errors are
+checked first, before any gap-related warning would print.
+
+Length-range validation
+------------------------
+Hard error if res_min is smaller than the motif's own residue count
+(excluding gaps) -- checked before any gap processing, so nothing else
+prints beforehand. Warning (not fatal) if res_min clears that bar but
+res_max is still too tight for even the smallest per-gap estimate -- the
+terminal budget clamps to 0 and the contig is still printed.
 
 Chain selection
 ---------------
@@ -176,8 +194,8 @@ def compute_terminals_simple(motif_residues, gap_lo_sum, res_max):
     return 0, max(0, term_hi)
 
 
-def terminal_budget(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, use_strict):
-    """Shared term_lo/term_hi resolution, printing a warning if the requested range is too tight."""
+def check_motif_fits(motif_residues, res_min):
+    """Hard error -- checked before any gap processing/warnings, not just alongside them."""
     if res_min < motif_residues:
         raise LengthRangeError(
             f"res_min ({res_min}) is smaller than the motif's own residue count "
@@ -185,17 +203,17 @@ def terminal_budget(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, us
             f"motif residues, let alone the gaps."
         )
 
+
+def terminal_budget(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, use_strict):
+    """Shared term_lo/term_hi resolution, printing a warning if the requested range is too tight."""
     if use_strict:
         term_lo, term_hi, clamped = compute_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max)
         if clamped:
             suggested_max = motif_residues + gap_hi_sum + 2 * max(term_lo, 1)
             print(
-                f"\n  WARNING: gap estimates ({gap_lo_sum}-{gap_hi_sum} aa) leave no consistent "
-                f"terminal budget within the requested length range "
-                f"({res_min}-{res_max} aa).\n"
-                f"  Terminals clamped to {term_lo} residues each.\n"
-                f"  To fully satisfy the length range, set res_max >= {suggested_max}.\n"
-                f"  Gap ranges are unchanged.",
+                f"  Warning: gap estimates ({gap_lo_sum}-{gap_hi_sum} aa) leave no consistent "
+                f"terminal budget within {res_min}-{res_max} aa; terminals clamped to {term_lo} "
+                f"each -- try res_max >= {suggested_max}.",
                 file=sys.stderr,
             )
     else:
@@ -203,11 +221,9 @@ def terminal_budget(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, us
         if res_max - motif_residues - gap_lo_sum < 0:
             suggested_max = motif_residues + gap_lo_sum
             print(
-                f"\n  WARNING: even the smallest gap estimates ({gap_lo_sum} aa total) push the "
-                f"minimum feasible length to {motif_residues + gap_lo_sum} aa, above the "
-                f"requested res_max ({res_max}).\n"
-                f"  Terminal budget clamped to 0.\n"
-                f"  A bigger design length range is probably necessary (res_max >= {suggested_max}).",
+                f"  Warning: even the smallest gap estimates ({gap_lo_sum} aa total) push the "
+                f"minimum feasible length to {suggested_max} aa, above res_max ({res_max}) -- "
+                f"a bigger design length range is probably necessary (res_max >= {suggested_max}).",
                 file=sys.stderr,
             )
 
@@ -243,6 +259,7 @@ def _gapped_chain_segment(chain, gaps, res_min, res_max, gap_size_data, use_stri
     cid = chain.get_id()
     first_res, last_res = chain_span(chain)
     motif_residues = len(Selection.unfold_entities(chain, "R"))
+    check_motif_fits(motif_residues, res_min)
 
     distances = ca_distances(chain)
     agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
@@ -256,6 +273,7 @@ def _gapped_chain_segment(chain, gaps, res_min, res_max, gap_size_data, use_stri
         gap_estimates.append((aa_low, aa_high, prev_resnum, curr_resnum))
         print(f"  Gap {cid}{prev_resnum}-{curr_resnum}: {gap_ang} Å  ->  {aa_low}-{aa_high} residues", file=sys.stderr)
         warn_if_gap_too_large(f"{cid}{prev_resnum}-{curr_resnum}", gap_ang, threshold, res_min, res_max)
+    print(file=sys.stderr)
 
     gap_lo_sum = sum(lo for lo, hi, *_ in gap_estimates)
     gap_hi_sum = sum(hi for lo, hi, *_ in gap_estimates)
@@ -282,6 +300,8 @@ def _gapped_chain_segment(chain, gaps, res_min, res_max, gap_size_data, use_stri
 def _chain_order_segment(chains, chain_ids, res_min, res_max, gap_size_data, use_strict_terminals, sep):
     """Chains merged in chain_ids order via inter-chain gaps: [term/]fixed/gap/fixed[/.../term], joined by sep."""
     motif_residues = sum(len(Selection.unfold_entities(c, "R")) for c in chains)
+    check_motif_fits(motif_residues, res_min)
+
     agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
     threshold = gap_size_warn_threshold(agg)
 
@@ -294,6 +314,7 @@ def _chain_order_segment(chains, chain_ids, res_min, res_max, gap_size_data, use
         label = f"{chain_ids[i]}(last)-{chain_ids[i + 1]}(first)"
         print(f"  Gap {label}: {gap_ang} Å  ->  {aa_low}-{aa_high} residues", file=sys.stderr)
         warn_if_gap_too_large(label, gap_ang, threshold, res_min, res_max)
+    print(file=sys.stderr)
 
     gap_lo_sum = sum(lo for lo, hi in gap_estimates)
     gap_hi_sum = sum(hi for lo, hi in gap_estimates)
@@ -324,13 +345,18 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, u
     separator: "," for the standard style, "/" for --rfd1.
     """
     all_chains = list(structure[0].get_list())
+    print(f"  Chains found: {', '.join(c.get_id() for c in all_chains)}", file=sys.stderr)
 
     if chain_order:
         chain_ids = [c.strip() for c in chain_order.split(",") if c.strip()]
         if not chain_ids:
             raise ValueError("--chain-order must list at least one chain.")
+        print(
+            f"  Motif identified via --chain-order: {', '.join(chain_ids)} "
+            f"(merged into one chain, gaps measured between consecutive chains)",
+            file=sys.stderr,
+        )
         ordered_chains = [get_chain(structure, cid) for cid in chain_ids]
-        print(f"  Motif chains (contig order): {','.join(chain_ids)}", file=sys.stderr)
 
         motif_segment = _chain_order_segment(
             ordered_chains, chain_ids, res_min, res_max, gap_size_data, use_strict_terminals, sep
@@ -354,13 +380,16 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, u
             "Not motif chain identified, motif chains have to have gaps. "
             "If the motif is defined over multiple chains use --chain-order"
         )
-    gapped_ids = {chain.get_id() for chain, _ in gapped}
     gaps_by_id = {chain.get_id(): gaps for chain, gaps in gapped}
+    print(
+        f"  Motif identified automatically (has internal gap(s)): {', '.join(gaps_by_id)}",
+        file=sys.stderr,
+    )
 
     groups = []
     for chain in all_chains:
         cid = chain.get_id()
-        if cid in gapped_ids:
+        if cid in gaps_by_id:
             groups.append(
                 _gapped_chain_segment(
                     chain, gaps_by_id[cid], res_min, res_max, gap_size_data, use_strict_terminals, sep

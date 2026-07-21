@@ -52,16 +52,33 @@ sizes seen in the checkpoint data for the requested `res_min`-`res_max`
 range, a warning is printed to stderr — the estimate is based on thin data
 out there, and a larger design is probably necessary.
 
+### Diagnostics (stderr)
+
+Every run starts by reporting what it found, before anything else:
+
+```
+  Chains found: A, B
+  Motif identified automatically (has internal gap(s)): A
+```
+
+(or, with `--chain-order`, `Motif identified via --chain-order: B, A (merged into one chain, gaps measured between consecutive chains)`.)
+
+Then one `Gap ...: X Å -> lo-hi residues` line per gap, each immediately
+followed by its own 95th-percentile warning if it applies; a blank line;
+then the length-range warning below if it applies. All diagnostic lines use
+the same two-space indent and `Warning: ...` phrasing, and both warnings
+print if both apply. Hard errors are checked before any of this is printed,
+so an errored run never prints a warning it's about to make moot.
+
 ## Length-range sanity checks
 
 - **Hard error** if `res_min` is smaller than the motif's own residue count
   (excluding gaps) — the requested range can't even fit the fixed motif
-  residues, let alone the gaps:
+  residues, let alone the gaps. Checked before any gap processing, so
+  nothing else prints beforehand:
 
   ```
-  Error: res_min (20) is smaller than the motif's own residue count (32) --
-  the requested length range can't even fit the fixed motif residues, let
-  alone the gaps.
+  Error: res_min (20) is smaller than the motif's own residue count (32) -- the requested length range can't even fit the fixed motif residues, let alone the gaps.
   ```
 
 - **Warning** (not fatal) if `res_min` clears that bar but `res_max` is
@@ -70,9 +87,7 @@ out there, and a larger design is probably necessary.
   satisfy `res_max`:
 
   ```
-  WARNING: even the smallest gap estimates (24 aa total) push the minimum
-  feasible length to 56 aa, above the requested res_max (40).
-  A bigger design length range is probably necessary (res_max >= 56).
+  Warning: even the smallest gap estimates (24 aa total) push the minimum feasible length to 56 aa, above res_max (40) -- a bigger design length range is probably necessary (res_max >= 56).
   ```
 
 Options:
