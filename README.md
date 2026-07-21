@@ -52,6 +52,29 @@ sizes seen in the checkpoint data for the requested `res_min`-`res_max`
 range, a warning is printed to stderr — the estimate is based on thin data
 out there, and a larger design is probably necessary.
 
+## Length-range sanity checks
+
+- **Hard error** if `res_min` is smaller than the motif's own residue count
+  (excluding gaps) — the requested range can't even fit the fixed motif
+  residues, let alone the gaps:
+
+  ```
+  Error: res_min (20) is smaller than the motif's own residue count (32) --
+  the requested length range can't even fit the fixed motif residues, let
+  alone the gaps.
+  ```
+
+- **Warning** (not fatal) if `res_min` clears that bar but `res_max` is
+  still too tight for even the smallest per-gap estimate — the terminal
+  budget clamps to 0 and the contig is still printed, but it likely won't
+  satisfy `res_max`:
+
+  ```
+  WARNING: even the smallest gap estimates (24 aa total) push the minimum
+  feasible length to 56 aa, above the requested res_max (40).
+  A bigger design length range is probably necessary (res_max >= 56).
+  ```
+
 Options:
 
 - `--pickle-file NAME_OR_PATH` — which statistics checkpoint to use: one of

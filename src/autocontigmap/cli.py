@@ -77,7 +77,15 @@ from .core import DEFAULT_CHECKPOINT, aggregate_by_residue_range, ca_distances, 
 GAP_SIZE_WARN_PERCENTILE = 0.95
 
 
-class MotifNotFoundError(Exception):
+class AutoContigmapError(Exception):
+    """Base for user-facing errors: caught in main(), printed to stderr, exit 1."""
+
+
+class MotifNotFoundError(AutoContigmapError):
+    pass
+
+
+class LengthRangeError(AutoContigmapError):
     pass
 
 
@@ -169,24 +177,39 @@ def compute_terminals_simple(motif_residues, gap_lo_sum, res_max):
 
 
 def terminal_budget(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, use_strict):
-    """Shared term_lo/term_hi resolution, printing the clamp warning if the strict form clamped."""
+    """Shared term_lo/term_hi resolution, printing a warning if the requested range is too tight."""
+    if res_min < motif_residues:
+        raise LengthRangeError(
+            f"res_min ({res_min}) is smaller than the motif's own residue count "
+            f"({motif_residues}) -- the requested length range can't even fit the fixed "
+            f"motif residues, let alone the gaps."
+        )
+
     if use_strict:
         term_lo, term_hi, clamped = compute_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max)
+        if clamped:
+            suggested_max = motif_residues + gap_hi_sum + 2 * max(term_lo, 1)
+            print(
+                f"\n  WARNING: gap estimates ({gap_lo_sum}-{gap_hi_sum} aa) leave no consistent "
+                f"terminal budget within the requested length range "
+                f"({res_min}-{res_max} aa).\n"
+                f"  Terminals clamped to {term_lo} residues each.\n"
+                f"  To fully satisfy the length range, set res_max >= {suggested_max}.\n"
+                f"  Gap ranges are unchanged.",
+                file=sys.stderr,
+            )
     else:
         term_lo, term_hi = compute_terminals_simple(motif_residues, gap_lo_sum, res_max)
-        clamped = False
-
-    if clamped:
-        suggested_max = motif_residues + gap_hi_sum + 2 * max(term_lo, 1)
-        print(
-            f"\n  WARNING: gap estimates ({gap_lo_sum}-{gap_hi_sum} aa) leave no consistent "
-            f"terminal budget within the requested length range "
-            f"({res_min}-{res_max} aa).\n"
-            f"  Terminals clamped to {term_lo} residues each.\n"
-            f"  To fully satisfy the length range, set res_max >= {suggested_max}.\n"
-            f"  Gap ranges are unchanged.",
-            file=sys.stderr,
-        )
+        if res_max - motif_residues - gap_lo_sum < 0:
+            suggested_max = motif_residues + gap_lo_sum
+            print(
+                f"\n  WARNING: even the smallest gap estimates ({gap_lo_sum} aa total) push the "
+                f"minimum feasible length to {motif_residues + gap_lo_sum} aa, above the "
+                f"requested res_max ({res_max}).\n"
+                f"  Terminal budget clamped to 0.\n"
+                f"  A bigger design length range is probably necessary (res_max >= {suggested_max}).",
+                file=sys.stderr,
+            )
 
     return term_lo, term_hi
 
@@ -414,7 +437,7 @@ def main():
             chain_order=args.chain_order, use_strict_terminals=args.strict_terminals,
             sep="/" if args.rfd1 else ",",
         )
-    except MotifNotFoundError as e:
+    except AutoContigmapError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
