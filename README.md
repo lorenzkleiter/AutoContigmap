@@ -24,36 +24,47 @@ autocontigmap motif.pdb <res_min> <res_max>
 
 Note: motif.pdb should only include the motif residues. Gaps are detected from that automatically. There is no way to input the whole protein and define the motif afterwards.
 
-Output on stdout:
+Output on stdout, with fixed motif/target chain spans included alongside
+the estimated gap-fill ranges:
 
 ```
-contig="5-15,60-100,5-15"
+"contig": "8-15,A18-25,16-30,A47-54,16-30,A92-99"
+"length": "150-200"
 ```
 
-where the first and last entries are the N-/C-terminal tail budgets and the
-middle entries are the estimated residue counts per internal gap.
+`length` is just `res_min-res_max` echoed back, for pinning the overall
+design length directly (the default terminal budget below otherwise only
+pins a `0-upper_bound` range, not an exact total).
 
-Pass `--rfd1` to instead print a full, old-style RFdiffusion(1) contig
-string, with chain letters and fixed residue ranges included:
+Pass `--rfd1` to instead print the equivalent old-style RFdiffusion(1)
+contig, slash-separated:
 
 ```
-contigmap.contigs=[5-15/B165-178/60-100/A0-20/5-15]
+contigmap.contigs=[8-15/A18-25/16-30/A47-54/16-30/A92-99]
+contigmap.length="150-200"
 ```
+
+A terminal segment that computes to exactly `0-0` is omitted from the
+contig entirely rather than printed as a literal `0`.
+
+If a gap's estimated Cα-Cα distance is beyond the 95th percentile of gap
+sizes seen in the checkpoint data for the requested `res_min`-`res_max`
+range, a warning is printed to stderr — the estimate is based on thin data
+out there, and a larger design is probably necessary.
 
 Options:
 
 - `--pickle-file NAME_OR_PATH` — which statistics checkpoint to use: one of
   the bundled variants `gyr` (default), `gyr_ss_2`, `standard`, `surface`,
   or a path to an external `.pkl` file.
-- `--rfd1` — output the old-style `contigmap.contigs=[...]` contig instead
-  of the plain numeric-ranges-only one. See "Chain selection" below for how
-  multi-chain PDBs are handled in this mode.
+- `--rfd1` — output the old-style `contigmap.contigs=[...]`/`contigmap.length=...`
+  form instead of the standard `"contig": ...`/`"length": ...` one.
 - `--chain-order B,A` — for motifs whose segments are split across separate
   PDB chains (one chain per segment) instead of one chain with internal
   chain breaks. Gaps are then measured between the last residue of each
   chain and the first residue of the next.
-- `--simple-terminals` — always emit `0-term_hi` at both ends instead of the
-  default `res_min`/`res_max` conflict-clamped terminal budget.
+- `--strict-terminals` — use the `res_min`/`res_max` conflict-clamped
+  terminal budget instead of the default simple `0-term_hi` one.
 
 ## Chain selection
 
@@ -68,9 +79,9 @@ motif is defined over multiple chains use --chain-order
 
 **Default mode (no `--chain-order`)**: every chain with an internal gap is
 gap-filled independently, each with its own terminal budget. Chains without
-a gap are carried through unchanged as fixed spans. In `--rfd1` output, all
-of these segments are joined with a hard chain break (`/0 `) in the PDB's
-chain order — each ends up as its own separate output chain.
+a gap are carried through unchanged as fixed spans. All of these segments
+are joined with a hard chain break (`/0 `) in the PDB's chain order — each
+ends up as its own separate output chain.
 
 **`--chain-order` mode**: the listed chains are instead scaffolded into a
 single continuous designed chain (no break between them, one shared
