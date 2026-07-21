@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autocontigmap"
-version = "0.3.2"
+version = "0.4.0"
 description = "Estimate RFdiffusion contig gap sizes for a motif PDB from real PDB residue-count-vs-Ca-distance statistics."
 readme = "README.md"
 requires-python = ">=3.9"

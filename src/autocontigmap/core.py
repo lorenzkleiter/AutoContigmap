@@ -22,6 +22,8 @@ from Bio.PDB.internal_coords import AtomKey
 from Bio.PDB.ic_rebuild import structure_rebuild_test
 
 DEFAULT_CHECKPOINT = "results_checkpoint_gyr"
+MIN_CHECKPOINT_RESIDUES = 10
+MAX_CHECKPOINT_RESIDUES = 499
 
 
 def load_pdb(pdb):
@@ -105,6 +107,50 @@ def aggregate_by_residue_range(Results, res_min, res_max):
             agg[key] = val
 
     return agg
+
+
+def _clamp_residue_range(res_min, res_max):
+    """Clamp to the checkpoint's covered [10, 499] range; raise if there's no overlap at all."""
+    if res_max < MIN_CHECKPOINT_RESIDUES or res_min > MAX_CHECKPOINT_RESIDUES:
+        raise ValueError(
+            f"Residue range [{res_min}, {res_max}] doesn't overlap the checkpoint's "
+            f"covered range [{MIN_CHECKPOINT_RESIDUES}, {MAX_CHECKPOINT_RESIDUES}]."
+        )
+    return max(MIN_CHECKPOINT_RESIDUES, int(res_min)), min(MAX_CHECKPOINT_RESIDUES, int(res_max))
+
+
+def estimate_gap_fill(gap_ang, res_min, res_max, checkpoint=DEFAULT_CHECKPOINT, gap_size_data=None):
+    """
+    (aa_low, aa_high) residue-count estimate for a gap of gap_ang Angstrom,
+    aggregated over the res_min-res_max total-protein-length range (clamped
+    to the checkpoint's covered [10, 499] range). Pass a pre-loaded
+    gap_size_data (from load_pickle()) to avoid re-reading the checkpoint
+    file for every call.
+    """
+    if gap_size_data is None:
+        gap_size_data = load_pickle(checkpoint)
+    res_min, res_max = _clamp_residue_range(res_min, res_max)
+    agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
+    gap_ang = int(math.floor(gap_ang))
+    aa_low = int(np.floor(agg["Q0.4"][gap_ang - 1]))
+    aa_high = int(np.floor(agg["Q0.6"][gap_ang - 1]))
+    return aa_low, aa_high
+
+
+def gap_size_percentile_threshold(res_min, res_max, percentile=0.95, checkpoint=DEFAULT_CHECKPOINT, gap_size_data=None):
+    """
+    Gap size (Å) at `percentile` of the gap-size distribution seen in the
+    checkpoint data for the res_min-res_max range (clamped to [10, 499]),
+    or None if it can't be determined (degenerate distribution).
+    """
+    if gap_size_data is None:
+        gap_size_data = load_pickle(checkpoint)
+    res_min, res_max = _clamp_residue_range(res_min, res_max)
+    agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
+    a = np.cumsum(agg["counts"])
+    norm = (a - a.min()) / (a.max() - a.min())
+    idx = np.where(norm > percentile)[0]
+    return int(idx[0]) + 1 if len(idx) else None
 
 
 def ca_distances(chain):

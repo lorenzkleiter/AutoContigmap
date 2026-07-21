@@ -137,3 +137,19 @@ contig = contigmap("motif.pdb", res=[150, 200])
 
 `contigmap()` prints its progress and returns the contig string (or `""` if
 the requested length range can't accommodate the estimated gaps).
+
+For callers that already have their own Cα-Cα distance measurement (not a
+Bio.PDB structure) and just want the lookup, use the lower-level functions
+directly — this is what the CLI itself is built from:
+
+```python
+from autocontigmap import estimate_gap_fill, gap_size_percentile_threshold, load_pickle
+
+data = load_pickle()  # load once, reuse across calls
+aa_low, aa_high = estimate_gap_fill(gap_ang=41, res_min=154, res_max=174, gap_size_data=data)
+p95 = gap_size_percentile_threshold(res_min=154, res_max=174, gap_size_data=data)
+```
+
+Both clamp `res_min`/`res_max` to the checkpoint's covered `[10, 499]`
+range and raise `ValueError` if the requested range doesn't overlap it at
+all.
