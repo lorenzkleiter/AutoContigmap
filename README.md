@@ -22,7 +22,7 @@ pip install "git+https://github.com/lorenzkleiter/AutoContigmap.git"
 autocontigmap motif.pdb <res_min> <res_max>
 ```
 
-Note: motif.pdb should only include the motif residues. Gaps are deteceted from that automatically. There is no way right now to input the whole protein and define the motif afterwards.
+Note: motif.pdb should only include the motif residues. Gaps are detected from that automatically. There is no way to input the whole protein and define the motif afterwards.
 
 Output on stdout:
 
