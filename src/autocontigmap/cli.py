@@ -93,6 +93,7 @@ from Bio.PDB import Selection
 from .core import DEFAULT_CHECKPOINT, aggregate_by_residue_range, ca_distances, load_pdb, load_pickle
 
 GAP_SIZE_WARN_PERCENTILE = 0.95
+CA_GAP_DISTANCE_THRESHOLD = 4.0  # Angstrom; a bonded Ca-Ca pair sits at ~3.8 A
 
 
 class AutoContigmapError(Exception):
@@ -107,14 +108,26 @@ class LengthRangeError(AutoContigmapError):
     pass
 
 
-def find_gaps_in_chain(chain):
-    """Return list of (i_prev, i_curr, prev_resnum, curr_resnum) for each gap."""
+def find_gaps_in_chain(chain, distance_threshold=CA_GAP_DISTANCE_THRESHOLD):
+    """Return list of (i_prev, i_curr, prev_resnum, curr_resnum) for each gap.
+
+    Flags a gap on a residue-numbering jump OR on a Ca-Ca distance beyond
+    distance_threshold, since some structures have breaks that keep
+    sequential numbering (e.g. renumbered chains) or non-sequential numbering
+    without an actual break (e.g. insertion codes).
+    """
     res_list = Selection.unfold_entities(chain, "R")
     gaps = []
     for i in range(1, len(res_list)):
-        prev_num = res_list[i - 1].get_id()[1]
-        curr_num = res_list[i].get_id()[1]
-        if curr_num - prev_num > 1:
+        prev_res = res_list[i - 1]
+        curr_res = res_list[i]
+        prev_num = prev_res.get_id()[1]
+        curr_num = curr_res.get_id()[1]
+        numbering_gap = curr_num - prev_num > 1
+        ca_gap = "CA" not in prev_res or "CA" not in curr_res or np.linalg.norm(
+            prev_res["CA"].coord - curr_res["CA"].coord
+        ) > distance_threshold
+        if numbering_gap or ca_gap:
             gaps.append((i - 1, i, prev_num, curr_num))
     return gaps
 
