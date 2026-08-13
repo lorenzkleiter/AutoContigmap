@@ -1,6 +1,6 @@
 # AutoContigmap
 
-Estimate RFdiffusion contig gap sizes for a motif PDB, from real PDB
+Estimate RFdiffusion contig gap sizes for a motif PDB, from PDB
 residue-count-vs-Cα-distance statistics, instead of guessing a gap/length
 range by hand.
 
@@ -8,7 +8,7 @@ Given a motif PDB with one or more chain breaks (or several single-segment
 chains meant to be scaffolded together) and a target total protein-length
 range, it looks up each gap's Cα-Cα distance against a bundled statistics
 checkpoint and reports a plausible residue-count range per gap, plus N-/C-
-terminal tail budgets — ready to paste into an RFdiffusion contig string.
+terminal tail budgets as an ready RFD3 or RFD contigmap string.
 
 ## Install
 
