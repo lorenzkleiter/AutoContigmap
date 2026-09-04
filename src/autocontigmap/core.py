@@ -257,7 +257,7 @@ def contigmap(pdb, res, gap_size_data=None):
             break
 
         elif chains_info[i]["min_size"] > chains_info[i]["res"][0] and chains_info[i]["gaps"] != []:
-            print("The lower limit of the amount of residues necessary for the gaps + the amount in the motif is smaller than the lower range given")
+            print("The lower limit of the amount of residues necessary for the gaps + the amount in the motif is bigger than the lower range given")
             print("You need a smaller lower limit of residues for", chains_info[i]["id"])
             print("The gaps in your motif are of size:", chains_info[i]["gap_sizes"])
             too_small = True
