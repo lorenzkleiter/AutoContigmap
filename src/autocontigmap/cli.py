@@ -236,10 +236,20 @@ def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
             f"{advice}"
         )
     if status == "clamped":
+        # The res_min that would make this "ok" is the same quantity the error
+        # messages call "recommended": the smallest one whose own gap estimates
+        # still fit at their high end. None when no res_min up to res_max does.
+        comfortable = (
+            None if gap_size_data is None
+            else smallest_feasible_res_min(
+                gap_size_data, motif_residues, gap_angstroms, res_max, use_high=True
+            )
+        )
+        tip = "" if comfortable is None else f" Use res_min >= {comfortable} to avoid this."
         print(
             f"  Warning: the lower terminal budget is negative and was pinned to 0; "
             f"res_min ({res_min}) is still reachable, but only when the gaps sample near "
-            f"their lower estimates ({gap_lo_sum} aa total).",
+            f"their lower estimates ({gap_lo_sum} aa total).{tip}",
             file=sys.stderr,
         )
 

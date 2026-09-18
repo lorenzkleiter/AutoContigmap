@@ -117,8 +117,14 @@ so an errored run never prints a warning it's about to make moot.
   estimates — the budget is pinned to 0 and the contig is still printed:
 
   ```
-  Warning: the lower terminal budget is negative and was pinned to 0; res_min (230) is still reachable, but only when the gaps sample near their lower estimates (102 aa total).
+  Warning: the lower terminal budget is negative and was pinned to 0; res_min (250) is still reachable, but only when the gaps sample near their lower estimates (109 aa total). Use res_min >= 268 to avoid this.
   ```
+
+  The suggested `res_min` is the same value the errors above call
+  *recommended* — the smallest one at which the high end of every gap
+  estimate still fits, which is exactly the threshold between a pinned and
+  an unpinned lower budget. The tip is dropped if no `res_min` up to the
+  given `res_max` clears it.
 
 Options:
 
