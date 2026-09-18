@@ -12,6 +12,7 @@ Contig assembly lives in cli.py.
 
 import math
 import pickle
+from pathlib import Path
 from importlib import resources
 
 import numpy as np
@@ -59,10 +60,9 @@ def load_pickle(name: str = DEFAULT_CHECKPOINT):
     """
     Load a residue-count-vs-Cα-distance checkpoint dataset.
 
-    `name` is either one of the bundled variants (results_checkpoint_gyr,
-    results_checkpoint_gyr_ss_2, results_checkpoint_standard,
-    results_checkpoint_surface — with or without the "results_checkpoint_"
-    prefix) or a filesystem path to an external .pkl file.
+    `name` is either the bundled checkpoint (results_checkpoint_gyr — with or
+    without the "results_checkpoint_" prefix) or a filesystem path to an
+    external .pkl file.
     """
     bundled = resources.files("autocontigmap.data") / f"{name}.pkl"
     if bundled.is_file():
@@ -74,7 +74,19 @@ def load_pickle(name: str = DEFAULT_CHECKPOINT):
         with short.open("rb") as f:
             return pickle.load(f)
 
-    with open(name, "rb") as f:
+    path = Path(name)
+    if not path.is_file():
+        bundled = sorted(
+            p.name[len("results_checkpoint_"):-len(".pkl")]
+            for p in Path(str(resources.files("autocontigmap.data"))).glob(
+                "results_checkpoint_*.pkl"
+            )
+        )
+        raise FileNotFoundError(
+            f"checkpoint {name!r} is neither a bundled variant "
+            f"({', '.join(bundled)}) nor an existing .pkl file."
+        )
+    with path.open("rb") as f:
         return pickle.load(f)
 
 
@@ -411,6 +423,48 @@ def split_terminal_budget(aa_term_low, aa_term_high, n_segments=1):
     lo = max(0, math.ceil(aa_term_low / n_term))
     hi = max(0, math.ceil(aa_term_high / n_term))
     return lo, max(lo, hi)
+
+
+def _gap_sums(gap_size_data, gap_angstroms, res_min, res_max):
+    """(gap_lo_sum, gap_hi_sum) over every gap, estimated for a [res_min, res_max] design."""
+    agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
+    lo_sum = hi_sum = 0
+    for gap_ang in gap_angstroms:
+        aa_low, aa_high = lookup_gap_estimate(agg, gap_ang)
+        lo_sum += aa_low
+        hi_sum += aa_high
+    return lo_sum, hi_sum
+
+
+def smallest_feasible_res_min(gap_size_data, motif_residues, gap_angstroms, res_max,
+                              use_high=False):
+    """
+    Smallest res_min that still clears its own length check once the gaps are
+    re-estimated over [res_min, res_max].
+
+    Sequence separation grows with chain length, so the motif + gap_lo_sum floor
+    read off a failing window is NOT itself a usable res_min: raising res_min to
+    it re-estimates the gaps upward and moves the floor again. Every candidate
+    here is therefore re-estimated against its own window, which also makes the
+    answer independent of the window that happened to fail.
+
+    use_high=False gives the smallest buildable res_min (the gaps have to sample
+    near their lower estimates). use_high=True gives the smallest res_min at
+    which the high end of every gap estimate still fits, i.e. the smallest one
+    with a non-negative lower terminal budget. None if nothing up to res_max
+    qualifies.
+    """
+    for candidate in range(max(MIN_CHECKPOINT_RESIDUES, motif_residues),
+                           min(res_max, MAX_CHECKPOINT_RESIDUES) + 1):
+        try:
+            gap_lo_sum, gap_hi_sum = _gap_sums(
+                gap_size_data, gap_angstroms, candidate, res_max
+            )
+        except GapEstimateUnavailable:
+            continue
+        if motif_residues + (gap_hi_sum if use_high else gap_lo_sum) <= candidate:
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------

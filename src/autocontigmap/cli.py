@@ -77,11 +77,18 @@ Any chain that contains at least one internal gap (chain break) is treated
 as a motif chain and gap-filled. If no chain has a gap and --chain-order
 isn't given, this is an error -- there is nothing to scaffold.
 
-Default mode (no --chain-order): every chain with an internal gap is
-gap-filled independently (its own terminal budget, its own designed
-segment); chains without a gap are carried through unchanged as fixed
-spans. All segments are joined with a hard chain break (/0 ) in the
-output's chain order.
+Default mode (no --chain-order): every chain with an internal gap becomes
+its own designed segment; chains without a gap are carried through
+unchanged as fixed spans. All segments are joined with a hard chain break
+(/0 ) in the output's chain order.
+
+The terminal budget is NOT per segment. res_min/res_max are whole-design
+lengths, so the motif count and the gap sums are pooled over every designed
+segment and the resulting budget is split over all 2 * n_segments terminals.
+Budgeting per segment would credit each one with the residues of all the
+others: with two gapped 40 aa chains and one 85-125 aa gap each, requesting
+300-400 used to emit 34-69 terminals, which can only express design totals
+of 386-606 -- unable to reach 300 at all, and overshooting 400 by 200.
 
 If the motif's segments are instead split across separate PDB chains (one
 chain per segment, no internal gaps), pass --chain-order with the segment
@@ -116,6 +123,7 @@ from .core import (
     load_pickle,
     lookup_gap_estimate,
     pooled_terminal_budget,
+    smallest_feasible_res_min,
     split_terminal_budget,
 )
 
@@ -174,8 +182,24 @@ def term_token(lo, hi):
     return str(lo) if lo == hi else f"{lo}-{hi}"
 
 
+def _range_advice(minimal, recommended):
+    """
+    Closing clause of a length-range error: the smallest res_min that works, and
+    the larger one that also clears the high end of the gap estimates.
+
+    Both come from a re-estimating scan (see core.smallest_feasible_res_min),
+    not from the floor computed for the window that just failed -- that floor
+    moves as soon as res_min does, so quoting it back is bad advice.
+    """
+    if minimal is None:
+        return " -- res_min and res_max both have to be increased."
+    if recommended is None or recommended <= minimal:
+        return f" -- try res_min >= {minimal}."
+    return f" -- try res_min >= {minimal}, or >= {recommended} (recommended)."
+
+
 def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
-                      n_segments=1):
+                      n_segments=1, gap_size_data=None, gap_angstroms=()):
     """
     Per-terminal (term_lo, term_hi) from the pooled permissive budget in core.
 
@@ -192,20 +216,24 @@ def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
     term_low, term_high, status = pooled_terminal_budget(
         motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max
     )
-    floor_length = motif_residues + gap_lo_sum
-
-    if status == "infeasible":
-        raise LengthRangeError(
-            f"the motif ({motif_residues} aa) plus the smallest gap estimates "
-            f"({gap_lo_sum} aa) needs at least {floor_length} aa, above res_max "
-            f"({res_max}) -- try res_max >= {floor_length}."
+    if status in ("infeasible", "unreachable_min"):
+        # One problem, not two. res_min <= res_max, so a res_max below the floor
+        # ("infeasible") puts res_min below it too, and clearing res_min makes
+        # res_max >= res_min >= floor automatic. Only res_min is worth scanning:
+        # advising a bigger res_max would just hand back a range that fails the
+        # other check on the next run.
+        advice = _range_advice(
+            smallest_feasible_res_min(
+                gap_size_data, motif_residues, gap_angstroms, res_max
+            ),
+            smallest_feasible_res_min(
+                gap_size_data, motif_residues, gap_angstroms, res_max, use_high=True
+            ),
         )
-    if status == "unreachable_min":
         raise LengthRangeError(
             f"res_min ({res_min}) is below the shortest buildable design "
-            f"({floor_length} aa = {motif_residues} aa motif + {gap_lo_sum} aa minimum "
-            f"gaps), so the lower end of the requested range cannot be reached at any "
-            f"terminal length -- try res_min >= {floor_length}."
+            f"({motif_residues} aa motif + {gap_lo_sum}-{gap_hi_sum} aa of gaps)"
+            f"{advice}"
         )
     if status == "clamped":
         print(
@@ -290,29 +318,28 @@ def _estimate(agg, gap_ang, label, res_min, res_max, thresholds):
     return aa_low, aa_high
 
 
-def _gapped_chain_segment(chain, gaps, res_min, res_max, sep, agg, thresholds, n_segments=1):
-    """One chain with internal gaps: [term/]fixed/gap/fixed[/.../term], joined by sep."""
+def _chain_gap_estimates(chain, gaps, res_min, res_max, agg, thresholds):
+    """
+    Per-gap (aa_low, aa_high, prev_resnum, curr_resnum) for one chain's internal
+    gaps, plus the raw Cα-Cα distances they were estimated from.
+    """
     cid = chain.get_id()
-    first_res, last_res = chain_span(chain)
-    motif_residues = len(Selection.unfold_entities(chain, "R"))
-    check_motif_fits(motif_residues, res_min)
-
     distances = ca_distances(chain)
 
-
-    gap_estimates = []  # (aa_low, aa_high, prev_resnum, curr_resnum)
+    estimates, angstroms = [], []
     for (i_prev, i_curr, prev_resnum, curr_resnum) in gaps:
         gap_ang = math.floor(distances[i_prev][i_curr])
         label = f"{cid}{prev_resnum}-{curr_resnum}"
         aa_low, aa_high = _estimate(agg, gap_ang, label, res_min, res_max, thresholds)
-        gap_estimates.append((aa_low, aa_high, prev_resnum, curr_resnum))
-    print(file=sys.stderr)
+        estimates.append((aa_low, aa_high, prev_resnum, curr_resnum))
+        angstroms.append(gap_ang)
+    return estimates, angstroms
 
-    gap_lo_sum = sum(lo for lo, hi, *_ in gap_estimates)
-    gap_hi_sum = sum(hi for lo, hi, *_ in gap_estimates)
-    term_lo, term_hi = resolve_terminals(
-        motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, n_segments,
-    )
+
+def _gapped_chain_parts(chain, gap_estimates, term_lo, term_hi, sep):
+    """One chain with internal gaps: [term/]fixed/gap/fixed[/.../term], joined by sep."""
+    cid = chain.get_id()
+    first_res, last_res = chain_span(chain)
 
     parts = []
     lead = term_token(term_lo, term_hi)
@@ -330,26 +357,19 @@ def _gapped_chain_segment(chain, gaps, res_min, res_max, sep, agg, thresholds, n
     return sep.join(parts)
 
 
-def _chain_order_segment(chains, chain_ids, res_min, res_max, sep, agg, thresholds, n_segments=1):
-    """Chains merged in chain_ids order via inter-chain gaps: [term/]fixed/gap/fixed[/.../term], joined by sep."""
-    motif_residues = sum(len(Selection.unfold_entities(c, "R")) for c in chains)
-    check_motif_fits(motif_residues, res_min)
-
-
-
-    gap_estimates = []  # (aa_low, aa_high)
+def _chain_order_estimates(chains, chain_ids, res_min, res_max, agg, thresholds):
+    """Per-gap (aa_low, aa_high) between consecutive chains, plus their Cα-Cα distances."""
+    estimates, angstroms = [], []
     for i in range(len(chains) - 1):
         gap_ang = math.floor(interchain_gap_distance(chains[i], chains[i + 1]))
         label = f"{chain_ids[i]}(last)-{chain_ids[i + 1]}(first)"
-        gap_estimates.append(_estimate(agg, gap_ang, label, res_min, res_max, thresholds))
-    print(file=sys.stderr)
+        estimates.append(_estimate(agg, gap_ang, label, res_min, res_max, thresholds))
+        angstroms.append(gap_ang)
+    return estimates, angstroms
 
-    gap_lo_sum = sum(lo for lo, hi in gap_estimates)
-    gap_hi_sum = sum(hi for lo, hi in gap_estimates)
-    term_lo, term_hi = resolve_terminals(
-        motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, n_segments,
-    )
 
+def _chain_order_parts(chains, gap_estimates, term_lo, term_hi, sep):
+    """Chains merged into one designed chain: [term/]fixed/gap/fixed[/.../term], joined by sep."""
     parts = []
     lead = term_token(term_lo, term_hi)
     if lead is not None:
@@ -365,15 +385,31 @@ def _chain_order_segment(chains, chain_ids, res_min, res_max, sep, agg, threshol
     return sep.join(parts)
 
 
+def n_motif_residues(chains):
+    """Residues in the designed segments. Chains carried through unchanged don't count."""
+    return sum(len(Selection.unfold_entities(c, "R")) for c in chains)
+
+
 def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, sep=","):
     """
     Assemble the full contig body (without the surrounding "contigmap.contigs=[...]"
     or '"contig": "..."' wrapper): one designed/fixed segment per output
     chain, joined by a hard chain break ("/0 "). `sep` is the intra-chain
     separator: "," for the standard style, "/" for --rfd1.
+
+    res_min/res_max are whole-design lengths, so the motif count and the terminal
+    budget are pooled over EVERY designed segment and only then split back over
+    the 2 * n_segments terminals. Budgeting per segment would credit each one
+    with the residues of all the others -- with two gapped chains of 60 aa each,
+    both would compute their terminals as if 60 aa of the requested length were
+    free rather than 120. Chains carried through unchanged are not designed and
+    count towards neither the motif total nor the budget.
     """
     all_chains = list(structure[0].get_list())
     print(f"  Chains found: {', '.join(c.get_id() for c in all_chains)}", file=sys.stderr)
+
+    agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
+    thresholds = gap_size_thresholds(gap_size_data)
 
     if chain_order:
         chain_ids = [c.strip() for c in chain_order.split(",") if c.strip()]
@@ -386,11 +422,23 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, s
         )
         ordered_chains = [get_chain(structure, cid) for cid in chain_ids]
 
-        agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
-        thresholds = gap_size_thresholds(gap_size_data)
-        motif_segment = _chain_order_segment(
-            ordered_chains, chain_ids, res_min, res_max, sep, agg, thresholds,
-            n_segments=1,
+        motif_residues = n_motif_residues(ordered_chains)
+        check_motif_fits(motif_residues, res_min)
+
+        gap_estimates, gap_angstroms = _chain_order_estimates(
+            ordered_chains, chain_ids, res_min, res_max, agg, thresholds
+        )
+        print(file=sys.stderr)
+
+        term_lo, term_hi = resolve_terminals(
+            motif_residues,
+            sum(lo for lo, _ in gap_estimates),
+            sum(hi for _, hi in gap_estimates),
+            res_min, res_max, n_segments=1,
+            gap_size_data=gap_size_data, gap_angstroms=gap_angstroms,
+        )
+        motif_segment = _chain_order_parts(
+            ordered_chains, gap_estimates, term_lo, term_hi, sep
         )
 
         used_ids = set(chain_ids)
@@ -417,19 +465,35 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, s
         file=sys.stderr,
     )
 
-    agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
-    thresholds = gap_size_thresholds(gap_size_data)
-    n_segments = len(gaps_by_id)
+    designed = [chain for chain in all_chains if chain.get_id() in gaps_by_id]
+    motif_residues = n_motif_residues(designed)
+    check_motif_fits(motif_residues, res_min)
+
+    estimates_by_id, gap_angstroms = {}, []
+    for chain in designed:
+        cid = chain.get_id()
+        estimates, angstroms = _chain_gap_estimates(
+            chain, gaps_by_id[cid], res_min, res_max, agg, thresholds
+        )
+        estimates_by_id[cid] = estimates
+        gap_angstroms.extend(angstroms)
+    print(file=sys.stderr)
+
+    all_estimates = [e for estimates in estimates_by_id.values() for e in estimates]
+    term_lo, term_hi = resolve_terminals(
+        motif_residues,
+        sum(lo for lo, hi, *_ in all_estimates),
+        sum(hi for lo, hi, *_ in all_estimates),
+        res_min, res_max, n_segments=len(designed),
+        gap_size_data=gap_size_data, gap_angstroms=gap_angstroms,
+    )
 
     groups = []
     for chain in all_chains:
         cid = chain.get_id()
-        if cid in gaps_by_id:
+        if cid in estimates_by_id:
             groups.append(
-                _gapped_chain_segment(
-                    chain, gaps_by_id[cid], res_min, res_max, sep, agg, thresholds,
-                    n_segments=n_segments,
-                )
+                _gapped_chain_parts(chain, estimates_by_id[cid], term_lo, term_hi, sep)
             )
         else:
             first_res, last_res = chain_span(chain)
@@ -458,9 +522,8 @@ def main():
         "--pickle-file",
         default=DEFAULT_CHECKPOINT,
         help=(
-            "Checkpoint dataset to use: one of the bundled variants "
-            "(gyr [default], gyr_ss_2, standard, surface) or a path to an "
-            "external .pkl file."
+            "Checkpoint dataset to use: the bundled 'gyr' variant (default) "
+            "or a path to an external .pkl file."
         ),
     )
     parser.add_argument(
@@ -496,7 +559,11 @@ def main():
         print("Error: res_min must be <= res_max.", file=sys.stderr)
         sys.exit(1)
 
-    gap_size_data = load_pickle(args.pickle_file)
+    try:
+        gap_size_data = load_pickle(args.pickle_file)
+    except (OSError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     structure = load_pdb(args.pdb_file)
 
     try:

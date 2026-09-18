@@ -19,8 +19,12 @@ pip install "git+https://github.com/lorenzkleiter/AutoContigmap.git"
 ## CLI usage
 
 ```bash
-autocontigmap motif.pdb <res_min> <res_max>
+autocontigmap motif.pdb <res_min> [<res_max>]
 ```
+
+If `res_max` is omitted, `res_min` is treated as a single fixed target
+length (internally `res_max = res_min`) and `length` is printed as that
+single value (`"408"`) rather than a `min-max` range.
 
 Note: motif.pdb should only include the motif residues. Gaps are detected from that automatically. There is no way to input the whole protein and define the motif afterwards.
 
@@ -32,7 +36,8 @@ the estimated gap-fill ranges:
 "length": "150-200"
 ```
 
-`length` is just `res_min-res_max` echoed back, for pinning the overall
+`length` is just `res_min-res_max` (or the single `res_min`) echoed back,
+for pinning the overall
 design length directly (the default terminal budget below otherwise only
 pins a `0-upper_bound` range, not an exact total).
 
@@ -81,28 +86,50 @@ so an errored run never prints a warning it's about to make moot.
   Error: res_min (20) is smaller than the motif's own residue count (32) -- the requested length range can't even fit the fixed motif residues, let alone the gaps.
   ```
 
-- **Warning** (not fatal) if `res_min` clears that bar but `res_max` is
-  still too tight for even the smallest per-gap estimate — the terminal
-  budget clamps to 0 and the contig is still printed, but it likely won't
-  satisfy `res_max`:
+- **Hard error** if `res_min` is below `motif + gap_lo_sum` — the lower end
+  of the requested range can't be reached at any terminal length:
 
   ```
-  Warning: even the smallest gap estimates (24 aa total) push the minimum feasible length to 56 aa, above res_max (40) -- a bigger design length range is probably necessary (res_max >= 56).
+  Error: res_min (181) is below the shortest buildable design (120 aa motif + 100-133 aa of gaps) -- try res_min >= 225, or >= 268 (recommended).
+  ```
+
+  A `res_max` below the same floor reports the same error. It is the same
+  problem: `res_min <= res_max`, so a `res_max` under the floor puts
+  `res_min` under it too, and raising `res_min` above it makes `res_max`
+  fine automatically — so only `res_min` is ever suggested.
+
+  The two values come from a scan that **re-estimates the gaps at every
+  candidate**, against the `res_max` you gave. Sequence separation grows
+  with chain length, so the `motif + gap_lo_sum` floor computed for the
+  window that just failed is not itself a usable `res_min` — raising
+  `res_min` to it re-estimates the gaps upward and moves the floor again.
+  The first value is the smallest `res_min` that builds at all; the second,
+  the recommended one, is the smallest at which the *high* end of every gap
+  estimate still fits, so it also avoids the pinned-terminal warning below.
+  If no `res_min` works at that `res_max`, the message says so instead:
+
+  ```
+  Error: res_min (130) is below the shortest buildable design (120 aa motif + 55-75 aa of gaps) -- res_min and res_max both have to be increased.
+  ```
+
+- **Warning** (not fatal) if the lower terminal budget is negative but
+  every requested length is still reachable with the gaps near their lower
+  estimates — the budget is pinned to 0 and the contig is still printed:
+
+  ```
+  Warning: the lower terminal budget is negative and was pinned to 0; res_min (230) is still reachable, but only when the gaps sample near their lower estimates (102 aa total).
   ```
 
 Options:
 
-- `--pickle-file NAME_OR_PATH` — which statistics checkpoint to use: one of
-  the bundled variants `gyr` (default), `gyr_ss_2`, `standard`, `surface`,
-  or a path to an external `.pkl` file.
+- `--pickle-file NAME_OR_PATH` — which statistics checkpoint to use: the
+  bundled `gyr` variant (default), or a path to an external `.pkl` file.
 - `--rfd1` — output the old-style `contigmap.contigs=[...]`/`contigmap.length=...`
   form instead of the standard `"contig": ...`/`"length": ...` one.
 - `--chain-order B,A` — for motifs whose segments are split across separate
   PDB chains (one chain per segment) instead of one chain with internal
   chain breaks. Gaps are then measured between the last residue of each
   chain and the first residue of the next.
-- `--strict-terminals` — use the `res_min`/`res_max` conflict-clamped
-  terminal budget instead of the default simple `0-term_hi` one.
 
 ## Chain selection
 
@@ -116,10 +143,16 @@ motif is defined over multiple chains use --chain-order
 ```
 
 **Default mode (no `--chain-order`)**: every chain with an internal gap is
-gap-filled independently, each with its own terminal budget. Chains without
-a gap are carried through unchanged as fixed spans. All of these segments
-are joined with a hard chain break (`/0 `) in the PDB's chain order — each
-ends up as its own separate output chain.
+gap-filled and becomes its own designed segment. Chains without a gap are
+carried through unchanged as fixed spans. All of these segments are joined
+with a hard chain break (`/0 `) in the PDB's chain order — each ends up as
+its own separate output chain.
+
+The terminal budget is **shared, not per segment**. `res_min`/`res_max` are
+whole-design lengths, so the motif residues and gap estimates are pooled
+over every designed segment and that single budget is split across all
+`2 * n_segments` terminals. Chains carried through unchanged are not
+designed and count towards neither.
 
 **`--chain-order` mode**: the listed chains are instead scaffolded into a
 single continuous designed chain (no break between them, one shared
@@ -129,27 +162,55 @@ spans, each behind its own chain break.
 
 ## Python API
 
-```python
-from autocontigmap import contigmap
-
-contig = contigmap("motif.pdb", res=[150, 200])
-```
-
-`contigmap()` prints its progress and returns the contig string (or `""` if
-the requested length range can't accommodate the estimated gaps).
-
-For callers that already have their own Cα-Cα distance measurement (not a
-Bio.PDB structure) and just want the lookup, use the lower-level functions
-directly — this is what the CLI itself is built from:
+The contig assembly itself lives in the CLI (`autocontigmap.cli`); the
+package exports the pieces it is built from. For callers that already have
+their own Cα-Cα distance measurement and just want the lookup:
 
 ```python
-from autocontigmap import estimate_gap_fill, gap_size_percentile_threshold, load_pickle
+from autocontigmap import estimate_gap_fill, load_pickle
 
 data = load_pickle()  # load once, reuse across calls
 aa_low, aa_high = estimate_gap_fill(gap_ang=41, res_min=154, res_max=174, gap_size_data=data)
-p95 = gap_size_percentile_threshold(res_min=154, res_max=174, gap_size_data=data)
 ```
 
-Both clamp `res_min`/`res_max` to the checkpoint's covered `[10, 499]`
-range and raise `ValueError` if the requested range doesn't overlap it at
-all.
+`estimate_gap_fill()` clamps `res_min`/`res_max` to the checkpoint's
+covered `[10, 499]` range and raises `ValueError` if the requested range
+doesn't overlap it at all.
+
+To reproduce the CLI's plausibility check, `length_distance_thresholds()`
+gives the per-chain-length Cα-Cα distance threshold at a percentile, and
+`check_gap_against_lengths()` turns a distance into a `GapSizeVerdict`
+(`level`, the lengths responsible, and the shortest design length that
+would support the gap):
+
+```python
+from autocontigmap import (
+    GAP_SIZE_ERROR_PERCENTILE,
+    GAP_SIZE_WARN_PERCENTILE,
+    check_gap_against_lengths,
+    length_distance_thresholds,
+    load_pickle,
+)
+
+data = load_pickle()
+thr_warn = length_distance_thresholds(data, GAP_SIZE_WARN_PERCENTILE)
+thr_error = length_distance_thresholds(data, GAP_SIZE_ERROR_PERCENTILE)
+verdict = check_gap_against_lengths(41, 154, 174, thr_warn, thr_error)
+```
+
+Also exported: `load_pdb`, `find_gaps_in_chain`, `ca_distances`,
+`aggregate_by_residue_range`, `lookup_gap_estimate`,
+`pooled_terminal_budget`, `split_terminal_budget`, and
+`smallest_feasible_res_min()` — the re-estimating scan behind the
+length-range suggestions above. Pass `use_high=True` for the recommended
+(upper-estimate) bound:
+
+```python
+from autocontigmap import load_pickle, smallest_feasible_res_min
+
+data = load_pickle()
+smallest_feasible_res_min(data, motif_residues=120, gap_angstroms=[40], res_max=400)
+# 225
+smallest_feasible_res_min(data, 120, [40], 400, use_high=True)
+# 268
+```
