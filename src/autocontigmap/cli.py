@@ -4,13 +4,16 @@ autocontigmap — CLI for motif gap estimation.
 
 Usage
 -----
-autocontigmap <pdb_file> <res_min> <res_max> [--pickle-file NAME_OR_PATH]
+autocontigmap <pdb_file> <res_min> [res_max] [--pickle-file NAME_OR_PATH]
 
 Arguments
 ---------
 pdb_file      Path to the motif PDB file
 res_min       Minimum total protein length in residues (integer, 10-499)
-res_max       Maximum total protein length in residues (integer, 10-499)
+res_max       Maximum total protein length in residues (integer, 10-499).
+              If omitted, res_min is treated as a single fixed target length
+              (internally res_max = res_min) and "length" is printed as that
+              single value ("100") rather than a "min-max" range.
 
 Output (stdout)
 ---------------
@@ -30,12 +33,18 @@ contig, slash-separated:
 the overall design length directly (the default terminal budget below
 otherwise only pins a 0-upper-bound range, not an exact total).
 
-Terminal (N-/C-terminal tail) budget defaults to the simple 0-term_hi form
-(term_hi = floor((res_max - motif - gap_lo_sum) / 2)). Pass
---strict-terminals for the old res_min/res_max conflict-clamped form
-instead (clamped to a single value at both ends if the two conflict, with a
-warning printed to stderr). A terminal segment that computes to exactly 0-0
-is omitted from the contig entirely rather than printed as a literal "0".
+Terminal (N-/C-terminal tail) budget comes from the pooled permissive budget
+
+    aa_term_low  = res_min - motif - gap_hi_sum
+    aa_term_high = res_max - motif - gap_lo_sum
+
+split over 2 * (number of designed segments) terminals, both bounds rounded
+up. The lower bound is kept rather than discarded: it is pinned to 0 only
+when aa_term_low < 0 while aa_term_low + sigma_gap >= 0, i.e. when every
+requested length is still reachable with the gaps near their lower
+estimates. If aa_term_low + sigma_gap < 0, res_min itself is unreachable and
+that is a hard error. A terminal segment that computes to exactly 0-0 is omitted from the contig entirely
+rather than printed as a literal "0".
 
 If a gap's estimated Cα-Cα distance is beyond the 95th percentile of gap
 sizes seen in the checkpoint data for this res_min-res_max range, a warning
@@ -56,9 +65,11 @@ Length-range validation
 ------------------------
 Hard error if res_min is smaller than the motif's own residue count
 (excluding gaps) -- checked before any gap processing, so nothing else
-prints beforehand. Warning (not fatal) if res_min clears that bar but
-res_max is still too tight for even the smallest per-gap estimate -- the
-terminal budget clamps to 0 and the contig is still printed.
+prints beforehand. After gap estimation, two further hard errors: res_max
+below motif + gap_lo_sum (no admissible configuration exists at all), and
+res_min below motif + gap_lo_sum (the lower end of the requested range
+cannot be reached at any terminal length). A negative lower terminal budget
+that still leaves every length reachable is a warning, not an error.
 
 Chain selection
 ---------------
@@ -90,10 +101,23 @@ from pathlib import Path
 import numpy as np
 from Bio.PDB import Selection
 
-from .core import DEFAULT_CHECKPOINT, aggregate_by_residue_range, ca_distances, load_pdb, load_pickle
-
-GAP_SIZE_WARN_PERCENTILE = 0.95
-CA_GAP_DISTANCE_THRESHOLD = 4.0  # Angstrom; a bonded Ca-Ca pair sits at ~3.8 A
+from .core import (
+    DEFAULT_CHECKPOINT,
+    MAX_CHECKPOINT_RESIDUES,
+    GAP_SIZE_ERROR_PERCENTILE,
+    GAP_SIZE_WARN_PERCENTILE,
+    GapEstimateUnavailable,
+    aggregate_by_residue_range,
+    ca_distances,
+    find_gaps_in_chain,
+    check_gap_against_lengths,
+    length_distance_thresholds,
+    load_pdb,
+    load_pickle,
+    lookup_gap_estimate,
+    pooled_terminal_budget,
+    split_terminal_budget,
+)
 
 
 class AutoContigmapError(Exception):
@@ -108,28 +132,8 @@ class LengthRangeError(AutoContigmapError):
     pass
 
 
-def find_gaps_in_chain(chain, distance_threshold=CA_GAP_DISTANCE_THRESHOLD):
-    """Return list of (i_prev, i_curr, prev_resnum, curr_resnum) for each gap.
-
-    Flags a gap on a residue-numbering jump OR on a Ca-Ca distance beyond
-    distance_threshold, since some structures have breaks that keep
-    sequential numbering (e.g. renumbered chains) or non-sequential numbering
-    without an actual break (e.g. insertion codes).
-    """
-    res_list = Selection.unfold_entities(chain, "R")
-    gaps = []
-    for i in range(1, len(res_list)):
-        prev_res = res_list[i - 1]
-        curr_res = res_list[i]
-        prev_num = prev_res.get_id()[1]
-        curr_num = curr_res.get_id()[1]
-        numbering_gap = curr_num - prev_num > 1
-        ca_gap = "CA" not in prev_res or "CA" not in curr_res or np.linalg.norm(
-            prev_res["CA"].coord - curr_res["CA"].coord
-        ) > distance_threshold
-        if numbering_gap or ca_gap:
-            gaps.append((i - 1, i, prev_num, curr_num))
-    return gaps
+class GapDataError(AutoContigmapError):
+    pass
 
 
 def find_gapped_chains(structure):
@@ -170,41 +174,48 @@ def term_token(lo, hi):
     return str(lo) if lo == hi else f"{lo}-{hi}"
 
 
-def compute_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max):
+def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
+                      n_segments=1):
     """
-    Returns (term_lo, term_hi, clamped: bool).
+    Per-terminal (term_lo, term_hi) from the pooled permissive budget in core.
 
-    Normal case:
-        term_hi = floor((res_max - motif - gap_lo_sum) / 2)
-        term_lo = floor((res_min - motif - gap_hi_sum) / 2)
+    The lower bound is kept, not discarded: it is pinned to 0 only when
+    aa_term_low < 0 while aa_term_low + sigma_gap >= 0, i.e. when every length
+    in [res_min, res_max] is still reachable provided the gaps sample near
+    their lower estimates. If aa_term_low + sigma_gap < 0, res_min itself is
+    unreachable at any terminal assignment and that is a hard error rather than
+    a clamp.
 
-    Conflict: term_lo > term_hi or either is negative.
-        Clamp both to floor((res_max - motif - gap_hi_sum) / 2).
-        If even that is negative, clamp to 0.
+    Note that the emitted ranges still do not enforce [res_min, res_max] on
+    their own -- the separate "length" field does that.
     """
-    term_hi = math.floor((res_max - motif_residues - gap_lo_sum) / 2)
-    term_lo = math.floor((res_min - motif_residues - gap_hi_sum) / 2)
+    term_low, term_high, status = pooled_terminal_budget(
+        motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max
+    )
+    floor_length = motif_residues + gap_lo_sum
 
-    if term_lo < 0 or term_lo > term_hi:
-        fallback = math.floor((res_max - motif_residues - gap_hi_sum) / 2)
-        fallback = max(0, fallback)
-        return fallback, fallback, True
+    if status == "infeasible":
+        raise LengthRangeError(
+            f"the motif ({motif_residues} aa) plus the smallest gap estimates "
+            f"({gap_lo_sum} aa) needs at least {floor_length} aa, above res_max "
+            f"({res_max}) -- try res_max >= {floor_length}."
+        )
+    if status == "unreachable_min":
+        raise LengthRangeError(
+            f"res_min ({res_min}) is below the shortest buildable design "
+            f"({floor_length} aa = {motif_residues} aa motif + {gap_lo_sum} aa minimum "
+            f"gaps), so the lower end of the requested range cannot be reached at any "
+            f"terminal length -- try res_min >= {floor_length}."
+        )
+    if status == "clamped":
+        print(
+            f"  Warning: the lower terminal budget is negative and was pinned to 0; "
+            f"res_min ({res_min}) is still reachable, but only when the gaps sample near "
+            f"their lower estimates ({gap_lo_sum} aa total).",
+            file=sys.stderr,
+        )
 
-    return term_lo, term_hi, False
-
-
-def compute_terminals_simple(motif_residues, gap_lo_sum, res_max):
-    """
-    Simplified terminal budget (the default): always 0-term_hi at both ends,
-    skipping the res_min/res_max conflict clamping in compute_terminals().
-    Meant to be paired with the "length" field pinning the exact overall
-    scaffold length range directly, instead of relying on the terminal
-    range to do it.
-
-    term_hi = floor((res_max - motif - gap_lo_sum) / 2), floored at 0.
-    """
-    term_hi = math.floor((res_max - motif_residues - gap_lo_sum) / 2)
-    return 0, max(0, term_hi)
+    return split_terminal_budget(term_low, term_high, n_segments)
 
 
 def check_motif_fits(motif_residues, res_min):
@@ -217,57 +228,69 @@ def check_motif_fits(motif_residues, res_min):
         )
 
 
-def terminal_budget(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, use_strict):
-    """Shared term_lo/term_hi resolution, printing a warning if the requested range is too tight."""
-    if use_strict:
-        term_lo, term_hi, clamped = compute_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max)
-        if clamped:
-            suggested_max = motif_residues + gap_hi_sum + 2 * max(term_lo, 1)
-            print(
-                f"  Warning: gap estimates ({gap_lo_sum}-{gap_hi_sum} aa) leave no consistent "
-                f"terminal budget within {res_min}-{res_max} aa; terminals clamped to {term_lo} "
-                f"each -- try res_max >= {suggested_max}.",
-                file=sys.stderr,
-            )
-    else:
-        term_lo, term_hi = compute_terminals_simple(motif_residues, gap_lo_sum, res_max)
-        if res_max - motif_residues - gap_lo_sum < 0:
-            suggested_max = motif_residues + gap_lo_sum
-            print(
-                f"  Warning: even the smallest gap estimates ({gap_lo_sum} aa total) push the "
-                f"minimum feasible length to {suggested_max} aa, above res_max ({res_max}) -- "
-                f"a bigger design length range is probably necessary (res_max >= {suggested_max}).",
-                file=sys.stderr,
-            )
+def gap_size_thresholds(gap_size_data):
+    """
+    Per-length Cα-Cα distance thresholds at the warn and error percentiles.
 
-    return term_lo, term_hi
+    Computed from the raw checkpoint, before any aggregation over the requested
+    design-length window, so the short end of the range is judged on its own
+    data rather than on a pooled distribution that the longest chains dominate.
+    """
+    return (
+        length_distance_thresholds(gap_size_data, GAP_SIZE_WARN_PERCENTILE),
+        length_distance_thresholds(gap_size_data, GAP_SIZE_ERROR_PERCENTILE),
+    )
 
 
-def gap_size_warn_threshold(agg):
-    """Gap size (Å) at the GAP_SIZE_WARN_PERCENTILE of the aggregated gap-size distribution, or None."""
-    a = np.cumsum(agg["counts"])
-    norm = (a - a.min()) / (a.max() - a.min())
-    idx = np.where(norm > GAP_SIZE_WARN_PERCENTILE)[0]
-    return int(idx[0]) + 1 if len(idx) else None
-
-
-def warn_if_gap_too_large(label, gap_ang, threshold, res_min, res_max):
-    if threshold is not None and gap_ang > threshold:
-        pct = int(GAP_SIZE_WARN_PERCENTILE * 100)
-        print(
-            f"  Warning: gap {label} is {gap_ang} Å, beyond the {pct}th percentile "
-            f"({threshold} Å) of gap sizes seen in our data for {res_min}-{res_max}-residue "
-            f"proteins -- a bigger design length range is probably necessary.",
-            file=sys.stderr,
+def _verdict_message(label, gap_ang, verdict, res_min, res_max):
+    pct = int(verdict.percentile * 100)
+    lo, hi = verdict.bad_lengths
+    span = f"{lo}" if lo == hi else f"{lo}-{hi}"
+    msg = (
+        f"gap {label} is {gap_ang} \N{ANGSTROM SIGN}, beyond the {pct}th percentile of "
+        f"Cα-Cα distances for designs of {span} residues "
+        f"({verdict.n_bad} of the {verdict.n_total} lengths in {res_min}-{res_max})"
+    )
+    if verdict.min_viable is None:
+        return msg + (
+            f". No chain length up to {MAX_CHECKPOINT_RESIDUES} supports a gap this wide; "
+            f"the motif segments may be further apart than a single domain can span."
         )
+    return msg + f". The shortest design length that supports it is {verdict.min_viable}."
 
 
-# ---------------------------------------------------------------------------
-# Contig assembly, shared between the standard and --rfd1 output styles
-# (they differ only in the intra-chain separator: "," vs "/")
-# ---------------------------------------------------------------------------
+def check_gap_size(label, gap_ang, thresholds, res_min, res_max):
+    """
+    Check one gap against every length in the window, before aggregation.
 
-def _gapped_chain_segment(chain, gaps, res_min, res_max, gap_size_data, use_strict_terminals, sep):
+    Raises GapDataError past GAP_SIZE_ERROR_PERCENTILE, warns past
+    GAP_SIZE_WARN_PERCENTILE, and names the lengths responsible plus the res_min
+    that would clear the check.
+    """
+    verdict = check_gap_against_lengths(gap_ang, res_min, res_max, *thresholds)
+    if verdict is None:
+        return
+    message = _verdict_message(label, gap_ang, verdict, res_min, res_max)
+    if verdict.level == "error":
+        raise GapDataError(message)
+    print(f"  Warning: {message}", file=sys.stderr)
+
+
+def _estimate(agg, gap_ang, label, res_min, res_max, thresholds):
+    """Check the distance is plausible for every length in the window, then look it up."""
+    check_gap_size(label, gap_ang, thresholds, res_min, res_max)
+    try:
+        aa_low, aa_high = lookup_gap_estimate(agg, gap_ang)
+    except GapEstimateUnavailable as e:
+        raise GapDataError(f"gap {label}: {e}") from e
+    print(
+        f"  Gap {label}: {gap_ang} \N{ANGSTROM SIGN}  ->  {aa_low}-{aa_high} residues",
+        file=sys.stderr,
+    )
+    return aa_low, aa_high
+
+
+def _gapped_chain_segment(chain, gaps, res_min, res_max, sep, agg, thresholds, n_segments=1):
     """One chain with internal gaps: [term/]fixed/gap/fixed[/.../term], joined by sep."""
     cid = chain.get_id()
     first_res, last_res = chain_span(chain)
@@ -275,23 +298,20 @@ def _gapped_chain_segment(chain, gaps, res_min, res_max, gap_size_data, use_stri
     check_motif_fits(motif_residues, res_min)
 
     distances = ca_distances(chain)
-    agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
-    threshold = gap_size_warn_threshold(agg)
+
 
     gap_estimates = []  # (aa_low, aa_high, prev_resnum, curr_resnum)
     for (i_prev, i_curr, prev_resnum, curr_resnum) in gaps:
         gap_ang = math.floor(distances[i_prev][i_curr])
-        aa_low = int(np.floor(agg["Q0.4"][gap_ang - 1]))
-        aa_high = int(np.floor(agg["Q0.6"][gap_ang - 1]))
+        label = f"{cid}{prev_resnum}-{curr_resnum}"
+        aa_low, aa_high = _estimate(agg, gap_ang, label, res_min, res_max, thresholds)
         gap_estimates.append((aa_low, aa_high, prev_resnum, curr_resnum))
-        print(f"  Gap {cid}{prev_resnum}-{curr_resnum}: {gap_ang} Å  ->  {aa_low}-{aa_high} residues", file=sys.stderr)
-        warn_if_gap_too_large(f"{cid}{prev_resnum}-{curr_resnum}", gap_ang, threshold, res_min, res_max)
     print(file=sys.stderr)
 
     gap_lo_sum = sum(lo for lo, hi, *_ in gap_estimates)
     gap_hi_sum = sum(hi for lo, hi, *_ in gap_estimates)
-    term_lo, term_hi = terminal_budget(
-        motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, use_strict_terminals
+    term_lo, term_hi = resolve_terminals(
+        motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, n_segments,
     )
 
     parts = []
@@ -310,29 +330,24 @@ def _gapped_chain_segment(chain, gaps, res_min, res_max, gap_size_data, use_stri
     return sep.join(parts)
 
 
-def _chain_order_segment(chains, chain_ids, res_min, res_max, gap_size_data, use_strict_terminals, sep):
+def _chain_order_segment(chains, chain_ids, res_min, res_max, sep, agg, thresholds, n_segments=1):
     """Chains merged in chain_ids order via inter-chain gaps: [term/]fixed/gap/fixed[/.../term], joined by sep."""
     motif_residues = sum(len(Selection.unfold_entities(c, "R")) for c in chains)
     check_motif_fits(motif_residues, res_min)
 
-    agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
-    threshold = gap_size_warn_threshold(agg)
+
 
     gap_estimates = []  # (aa_low, aa_high)
     for i in range(len(chains) - 1):
         gap_ang = math.floor(interchain_gap_distance(chains[i], chains[i + 1]))
-        aa_low = int(np.floor(agg["Q0.4"][gap_ang - 1]))
-        aa_high = int(np.floor(agg["Q0.6"][gap_ang - 1]))
-        gap_estimates.append((aa_low, aa_high))
         label = f"{chain_ids[i]}(last)-{chain_ids[i + 1]}(first)"
-        print(f"  Gap {label}: {gap_ang} Å  ->  {aa_low}-{aa_high} residues", file=sys.stderr)
-        warn_if_gap_too_large(label, gap_ang, threshold, res_min, res_max)
+        gap_estimates.append(_estimate(agg, gap_ang, label, res_min, res_max, thresholds))
     print(file=sys.stderr)
 
     gap_lo_sum = sum(lo for lo, hi in gap_estimates)
     gap_hi_sum = sum(hi for lo, hi in gap_estimates)
-    term_lo, term_hi = terminal_budget(
-        motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, use_strict_terminals
+    term_lo, term_hi = resolve_terminals(
+        motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max, n_segments,
     )
 
     parts = []
@@ -350,7 +365,7 @@ def _chain_order_segment(chains, chain_ids, res_min, res_max, gap_size_data, use
     return sep.join(parts)
 
 
-def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, use_strict_terminals=False, sep=","):
+def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, sep=","):
     """
     Assemble the full contig body (without the surrounding "contigmap.contigs=[...]"
     or '"contig": "..."' wrapper): one designed/fixed segment per output
@@ -371,8 +386,11 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, u
         )
         ordered_chains = [get_chain(structure, cid) for cid in chain_ids]
 
+        agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
+        thresholds = gap_size_thresholds(gap_size_data)
         motif_segment = _chain_order_segment(
-            ordered_chains, chain_ids, res_min, res_max, gap_size_data, use_strict_terminals, sep
+            ordered_chains, chain_ids, res_min, res_max, sep, agg, thresholds,
+            n_segments=1,
         )
 
         used_ids = set(chain_ids)
@@ -399,13 +417,18 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, u
         file=sys.stderr,
     )
 
+    agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
+    thresholds = gap_size_thresholds(gap_size_data)
+    n_segments = len(gaps_by_id)
+
     groups = []
     for chain in all_chains:
         cid = chain.get_id()
         if cid in gaps_by_id:
             groups.append(
                 _gapped_chain_segment(
-                    chain, gaps_by_id[cid], res_min, res_max, gap_size_data, use_strict_terminals, sep
+                    chain, gaps_by_id[cid], res_min, res_max, sep, agg, thresholds,
+                    n_segments=n_segments,
                 )
             )
         else:
@@ -423,7 +446,14 @@ def main():
     )
     parser.add_argument("pdb_file", help="Path to the motif PDB file")
     parser.add_argument("res_min", type=int, help="Minimum total protein length (10-499)")
-    parser.add_argument("res_max", type=int, help="Maximum total protein length (10-499)")
+    parser.add_argument(
+        "res_max", type=int, nargs="?", default=None,
+        help=(
+            "Maximum total protein length (10-499). If omitted, res_min is treated "
+            "as a single fixed target length and \"length\" is printed as that single "
+            "value instead of a min-max range."
+        ),
+    )
     parser.add_argument(
         "--pickle-file",
         default=DEFAULT_CHECKPOINT,
@@ -442,13 +472,6 @@ def main():
         ),
     )
     parser.add_argument(
-        "--strict-terminals", action="store_true",
-        help=(
-            "Use the res_min/res_max conflict-clamped terminal budget instead of the "
-            "default simple 0-term_hi one (term_hi from the res_max/gap_lo_sum formula)."
-        ),
-    )
-    parser.add_argument(
         "--chain-order",
         help=(
             "Comma-separated chain IDs in contig order (e.g. 'B,A'), for motifs whose "
@@ -462,11 +485,14 @@ def main():
         print(f"Error: pdb_file not found: {args.pdb_file}", file=sys.stderr)
         sys.exit(1)
 
-    if not (10 <= args.res_min <= 499 and 10 <= args.res_max <= 499):
+    fixed_length = args.res_max is None
+    res_max = args.res_min if fixed_length else args.res_max
+
+    if not (10 <= args.res_min <= 499 and 10 <= res_max <= 499):
         print("Error: res_min and res_max must both be in [10, 499].", file=sys.stderr)
         sys.exit(1)
 
-    if args.res_min > args.res_max:
+    if args.res_min > res_max:
         print("Error: res_min must be <= res_max.", file=sys.stderr)
         sys.exit(1)
 
@@ -475,15 +501,14 @@ def main():
 
     try:
         body = build_contig(
-            structure, args.res_min, args.res_max, gap_size_data,
-            chain_order=args.chain_order, use_strict_terminals=args.strict_terminals,
-            sep="/" if args.rfd1 else ",",
+            structure, args.res_min, res_max, gap_size_data,
+            chain_order=args.chain_order, sep="/" if args.rfd1 else ",",
         )
     except AutoContigmapError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    length_range = f"{args.res_min}-{args.res_max}"
+    length_range = str(args.res_min) if fixed_length else f"{args.res_min}-{res_max}"
     if args.rfd1:
         print(f"contigmap.contigs=[{body}]")
         print(f'contigmap.length="{length_range}"')
