@@ -129,7 +129,9 @@ so an errored run never prints a warning it's about to make moot.
 Options:
 
 - `--pickle-file NAME_OR_PATH` — which statistics checkpoint to use: the
-  bundled `gyr` variant (default), or a path to an external `.pkl` file.
+  bundled `pisces_pc40` variant (default; non-redundant PISCES chains at 40%
+  sequence identity, X-ray, <= 3.0 A), the older redundant `gyr` variant, or a
+  path to an external `.pkl` file.
 - `--rfd1` — output the old-style `contigmap.contigs=[...]`/`contigmap.length=...`
   form instead of the standard `"contig": ...`/`"length": ...` one.
 - `--chain-order B,A` — for motifs whose segments are split across separate
@@ -180,7 +182,7 @@ aa_low, aa_high = estimate_gap_fill(gap_ang=41, res_min=154, res_max=174, gap_si
 ```
 
 `estimate_gap_fill()` clamps `res_min`/`res_max` to the checkpoint's
-covered `[10, 499]` range and raises `ValueError` if the requested range
+covered `[40, 499]` range and raises `ValueError` if the requested range
 doesn't overlap it at all.
 
 To reproduce the CLI's plausibility check, `length_distance_thresholds()`

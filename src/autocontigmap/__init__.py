@@ -1,4 +1,5 @@
 from .core import (
+    CHECKPOINT_COLUMN_OFFSET,
     DEFAULT_CHECKPOINT,
     MIN_CHECKPOINT_RESIDUES,
     MAX_CHECKPOINT_RESIDUES,
@@ -23,6 +24,7 @@ from .core import (
 __version__ = "0.4.0"
 
 __all__ = [
+    "CHECKPOINT_COLUMN_OFFSET",
     "DEFAULT_CHECKPOINT",
     "MIN_CHECKPOINT_RESIDUES",
     "MAX_CHECKPOINT_RESIDUES",

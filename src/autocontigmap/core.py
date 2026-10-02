@@ -22,8 +22,13 @@ from Bio.PDB import Selection
 from Bio.PDB.internal_coords import AtomKey
 from Bio.PDB.ic_rebuild import structure_rebuild_test
 
-DEFAULT_CHECKPOINT = "results_checkpoint_gyr"
-MIN_CHECKPOINT_RESIDUES = 10
+DEFAULT_CHECKPOINT = "results_checkpoint_pisces_pc40"
+# Checkpoint layout: column 0 holds chain length 10, so column = length - 10.
+# This is fixed by the matrices and independent of which lengths are usable.
+CHECKPOINT_COLUMN_OFFSET = 10
+# Usable design lengths. The PISCES lists start at 40 residues, so lengths
+# 10-39 hold next to no chains and are not offered.
+MIN_CHECKPOINT_RESIDUES = 40
 MAX_CHECKPOINT_RESIDUES = 499
 
 # A bonded Cα-Cα pair sits at ~3.8 Å; beyond this the backbone is broken.
@@ -60,9 +65,9 @@ def load_pickle(name: str = DEFAULT_CHECKPOINT):
     """
     Load a residue-count-vs-Cα-distance checkpoint dataset.
 
-    `name` is either the bundled checkpoint (results_checkpoint_gyr — with or
-    without the "results_checkpoint_" prefix) or a filesystem path to an
-    external .pkl file.
+    `name` is either a bundled checkpoint (results_checkpoint_pisces_pc40, the
+    default, or the older results_checkpoint_gyr — with or without the
+    "results_checkpoint_" prefix) or a filesystem path to an external .pkl file.
     """
     bundled = resources.files("autocontigmap.data") / f"{name}.pkl"
     if bundled.is_file():
@@ -119,8 +124,8 @@ def aggregate_by_residue_range(Results, res_min, res_max):
     Parameters
     ----------
     Results  : dict — the full checkpoint dictionary
-    res_min  : int  — minimum chain length, inclusive (10-499)
-    res_max  : int  — maximum chain length, inclusive (10-499)
+    res_min  : int  — minimum chain length, inclusive (40-499)
+    res_max  : int  — maximum chain length, inclusive (40-499)
 
     Returns
     -------
@@ -140,8 +145,8 @@ def aggregate_by_residue_range(Results, res_min, res_max):
         )
     shape = Results["Q0.5"].shape
     n_dist = shape[0]
-    col_min = res_min - MIN_CHECKPOINT_RESIDUES
-    col_max = res_max - MIN_CHECKPOINT_RESIDUES + 1
+    col_min = res_min - CHECKPOINT_COLUMN_OFFSET
+    col_max = res_max - CHECKPOINT_COLUMN_OFFSET + 1
     n_window = col_max - col_min
 
     weights_full = Results["no_pairs_aggregated"]  # chains per length, broadcast down rows
@@ -190,7 +195,7 @@ def aggregate_by_residue_range(Results, res_min, res_max):
 
 
 def _clamp_residue_range(res_min, res_max):
-    """Clamp to the checkpoint's covered [10, 499] range; raise if there's no overlap at all."""
+    """Clamp to the checkpoint's covered [40, 499] range; raise if there's no overlap at all."""
     if res_max < MIN_CHECKPOINT_RESIDUES or res_min > MAX_CHECKPOINT_RESIDUES:
         raise ValueError(
             f"Residue range [{res_min}, {res_max}] doesn't overlap the checkpoint's "
@@ -252,8 +257,9 @@ def lookup_gap_estimate(agg, gap_ang):
 def length_distance_thresholds(Results, percentile):
     """
     Per chain length, the Cα-Cα distance (Å) at `percentile` of THAT length's own
-    pair-distance distribution. Returns a 1-D array over chain lengths
-    10..MAX_CHECKPOINT_RESIDUES, NaN where a length has no data.
+    pair-distance distribution. Returns a 1-D array over every checkpoint
+    column, i.e. chain lengths CHECKPOINT_COLUMN_OFFSET..MAX_CHECKPOINT_RESIDUES,
+    NaN where a length has no data.
 
     This is deliberately computed before any aggregation over the requested
     design-length window. The pooled distribution is dominated by the longest
@@ -344,7 +350,7 @@ def check_gap_against_lengths(gap_ang, res_min, res_max, thr_warn, thr_error):
     GAP_SIZE_WARN_PERCENTILE for any length, otherwise None.
     """
     lengths = np.arange(res_min, res_max + 1)
-    cols = lengths - MIN_CHECKPOINT_RESIDUES
+    cols = lengths - CHECKPOINT_COLUMN_OFFSET
     err = _verdict(gap_ang, lengths, thr_error[cols], GAP_SIZE_ERROR_PERCENTILE, "error")
     if err is not None:
         return err
@@ -355,7 +361,7 @@ def estimate_gap_fill(gap_ang, res_min, res_max, checkpoint=DEFAULT_CHECKPOINT, 
     """
     (aa_low, aa_high) residue-count estimate for a gap of gap_ang Angstrom,
     aggregated over the res_min-res_max total-protein-length range (clamped
-    to the checkpoint's covered [10, 499] range). Pass a pre-loaded
+    to the checkpoint's covered [40, 499] range). Pass a pre-loaded
     gap_size_data (from load_pickle()) to avoid re-reading the checkpoint
     file for every call.
     """

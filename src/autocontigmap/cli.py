@@ -9,8 +9,8 @@ autocontigmap <pdb_file> <res_min> [res_max] [--pickle-file NAME_OR_PATH]
 Arguments
 ---------
 pdb_file      Path to the motif PDB file
-res_min       Minimum total protein length in residues (integer, 10-499)
-res_max       Maximum total protein length in residues (integer, 10-499).
+res_min       Minimum total protein length in residues (integer, 40-499)
+res_max       Maximum total protein length in residues (integer, 40-499).
               If omitted, res_min is treated as a single fixed target length
               (internally res_max = res_min) and "length" is printed as that
               single value ("100") rather than a "min-max" range.
@@ -110,6 +110,7 @@ from Bio.PDB import Selection
 
 from .core import (
     DEFAULT_CHECKPOINT,
+    MIN_CHECKPOINT_RESIDUES,
     MAX_CHECKPOINT_RESIDUES,
     GAP_SIZE_ERROR_PERCENTILE,
     GAP_SIZE_WARN_PERCENTILE,
@@ -519,11 +520,11 @@ def main():
         )
     )
     parser.add_argument("pdb_file", help="Path to the motif PDB file")
-    parser.add_argument("res_min", type=int, help="Minimum total protein length (10-499)")
+    parser.add_argument("res_min", type=int, help="Minimum total protein length (40-499)")
     parser.add_argument(
         "res_max", type=int, nargs="?", default=None,
         help=(
-            "Maximum total protein length (10-499). If omitted, res_min is treated "
+            "Maximum total protein length (40-499). If omitted, res_min is treated "
             "as a single fixed target length and \"length\" is printed as that single "
             "value instead of a min-max range."
         ),
@@ -561,8 +562,9 @@ def main():
     fixed_length = args.res_max is None
     res_max = args.res_min if fixed_length else args.res_max
 
-    if not (10 <= args.res_min <= 499 and 10 <= res_max <= 499):
-        print("Error: res_min and res_max must both be in [10, 499].", file=sys.stderr)
+    lo, hi = MIN_CHECKPOINT_RESIDUES, MAX_CHECKPOINT_RESIDUES
+    if not (lo <= args.res_min <= hi and lo <= res_max <= hi):
+        print(f"Error: res_min and res_max must both be in [{lo}, {hi}].", file=sys.stderr)
         sys.exit(1)
 
     if args.res_min > res_max:
