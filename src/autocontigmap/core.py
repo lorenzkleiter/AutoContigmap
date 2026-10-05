@@ -419,14 +419,9 @@ def split_terminal_budget(aa_term_low, aa_term_high, n_segments=1):
 
     `n_segments` is the number of designed segments that each receive an N- and
     a C-terminal range, so the budget divides over 2 * n_segments terminals.
-    Both bounds round UP: with an even budget the ceiling is inert, and with an
-    odd one it inflates the declared pooled range by one residue rather than
-    deciding a priori which terminal carries the extra residue. That surplus is
-    not realised in practice, because the length flag pins [res_min, res_max]
-    regardless of what the declared ranges permit.
     """
     n_term = 2 * max(1, n_segments)
-    lo = max(0, math.ceil(aa_term_low / n_term))
+    lo = max(0, math.floor(aa_term_low / n_term))
     hi = max(0, math.ceil(aa_term_high / n_term))
     return lo, max(lo, hi)
 
