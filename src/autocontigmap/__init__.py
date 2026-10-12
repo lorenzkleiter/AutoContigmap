@@ -19,6 +19,7 @@ from .core import (
     pooled_terminal_budget,
     smallest_feasible_res_min,
     split_terminal_budget,
+    ungapped_terminal_budget,
 )
 
 __version__ = "0.4.0"
@@ -44,4 +45,5 @@ __all__ = [
     "pooled_terminal_budget",
     "smallest_feasible_res_min",
     "split_terminal_budget",
+    "ungapped_terminal_budget",
 ]

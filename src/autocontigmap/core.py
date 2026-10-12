@@ -426,6 +426,18 @@ def split_terminal_budget(aa_term_low, aa_term_high, n_segments=1):
     return lo, max(lo, hi)
 
 
+def ungapped_terminal_budget(aa_term_high):
+    """
+    Per-terminal budget for a motif with no internal gaps: each end gets
+    0 to the whole pooled upper budget.
+
+    Without gaps there is nothing else to absorb the length variance, so
+    neither end is pre-committed to half of it; the length flag pins the
+    total to [res_min, res_max].
+    """
+    return 0, max(0, aa_term_high)
+
+
 def _gap_sums(gap_size_data, gap_angstroms, res_min, res_max):
     """(gap_lo_sum, gap_hi_sum) over every gap, estimated for a [res_min, res_max] design."""
     agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)

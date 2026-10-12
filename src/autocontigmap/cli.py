@@ -46,6 +46,10 @@ estimates. If aa_term_low + sigma_gap < 0, res_min itself is unreachable and
 that is a hard error. A terminal segment that computes to exactly 0-0 is omitted from the contig entirely
 rather than printed as a literal "0".
 
+A motif with no gaps at all (a single chain via --chain-order) is not split:
+each terminal gets 0 to the whole upper budget, res_max - motif, and the
+"length" field pins the total.
+
 If a gap's estimated Cα-Cα distance is beyond the 95th percentile of gap
 sizes seen in the checkpoint data for this res_min-res_max range, a warning
 is printed to stderr -- the estimate is based on thin data out there, and a
@@ -126,6 +130,7 @@ from .core import (
     pooled_terminal_budget,
     smallest_feasible_res_min,
     split_terminal_budget,
+    ungapped_terminal_budget,
 )
 
 
@@ -211,6 +216,9 @@ def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
     unreachable at any terminal assignment and that is a hard error rather than
     a clamp.
 
+    A motif with no gaps gets 0 to the whole upper budget on each end instead
+    of a split (see core.ungapped_terminal_budget).
+
     Note that the emitted ranges still do not enforce [res_min, res_max] on
     their own -- the separate "length" field does that.
     """
@@ -254,6 +262,8 @@ def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
             file=sys.stderr,
         )
 
+    if not gap_angstroms:
+        return ungapped_terminal_budget(term_high)
     return split_terminal_budget(term_low, term_high, n_segments)
 
 

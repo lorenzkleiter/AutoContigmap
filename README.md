@@ -52,6 +52,10 @@ contigmap.length="150-200"
 A terminal segment that computes to exactly `0-0` is omitted from the
 contig entirely rather than printed as a literal `0`.
 
+A motif with no gaps at all (a single chain via `--chain-order`) doesn't
+split the budget: each terminal gets `0` to the whole upper budget,
+`res_max - motif`, and the `length` field pins the total.
+
 If a gap's estimated Cα-Cα distance is beyond the 95th percentile of gap
 sizes seen in the checkpoint data for the requested `res_min`-`res_max`
 range, a warning is printed to stderr — the estimate is based on thin data
@@ -208,7 +212,8 @@ verdict = check_gap_against_lengths(41, 154, 174, thr_warn, thr_error)
 
 Also exported: `load_pdb`, `find_gaps_in_chain`, `ca_distances`,
 `aggregate_by_residue_range`, `lookup_gap_estimate`,
-`pooled_terminal_budget`, `split_terminal_budget`, and
+`pooled_terminal_budget`, `split_terminal_budget`,
+`ungapped_terminal_budget`, and
 `smallest_feasible_res_min()` — the re-estimating scan behind the
 length-range suggestions above. Pass `use_high=True` for the recommended
 (upper-estimate) bound:
