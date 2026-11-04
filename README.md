@@ -133,9 +133,11 @@ so an errored run never prints a warning it's about to make moot.
 Options:
 
 - `--pickle-file NAME_OR_PATH` — which statistics checkpoint to use: the
-  bundled `pisces_pc40` variant (default; non-redundant PISCES chains at 40%
-  sequence identity, X-ray, <= 3.0 A), the older redundant `gyr` variant, or a
-  path to an external `.pkl` file.
+  bundled `pisces_pc40_s5` variant (default; non-redundant PISCES chains at 40%
+  sequence identity, X-ray, <= 3.0 A, counting only residue pairs at least 5
+  apart in sequence, i.e. gaps between motif segments rather than residues
+  within one segment), `pisces_pc40` (the same chains with all pair
+  separations), or a path to an external `.pkl` file.
 - `--rfd1` — output the old-style `contigmap.contigs=[...]`/`contigmap.length=...`
   form instead of the standard `"contig": ...`/`"length": ...` one.
 - `--chain-order B,A` — for motifs whose segments are split across separate

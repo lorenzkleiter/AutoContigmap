@@ -543,8 +543,8 @@ def main():
         "--pickle-file",
         default=DEFAULT_CHECKPOINT,
         help=(
-            "Checkpoint dataset to use: the bundled 'gyr' variant (default) "
-            "or a path to an external .pkl file."
+            "Checkpoint dataset to use: the bundled 'pisces_pc40_s5' variant (default), "
+            "'pisces_pc40' (all pair separations) or a path to an external .pkl file."
         ),
     )
     parser.add_argument(

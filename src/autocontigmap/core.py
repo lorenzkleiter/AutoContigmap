@@ -22,7 +22,9 @@ from Bio.PDB import Selection
 from Bio.PDB.internal_coords import AtomKey
 from Bio.PDB.ic_rebuild import structure_rebuild_test
 
-DEFAULT_CHECKPOINT = "results_checkpoint_pisces_pc40"
+# Only residue pairs at least 5 apart in sequence: a gap lies between motif
+# segments, and residues 1-4 apart would sit inside one segment instead.
+DEFAULT_CHECKPOINT = "results_checkpoint_pisces_pc40_s5"
 # Checkpoint layout: column 0 holds chain length 10, so column = length - 10.
 # This is fixed by the matrices and independent of which lengths are usable.
 CHECKPOINT_COLUMN_OFFSET = 10
@@ -65,9 +67,10 @@ def load_pickle(name: str = DEFAULT_CHECKPOINT):
     """
     Load a residue-count-vs-Cα-distance checkpoint dataset.
 
-    `name` is either a bundled checkpoint (results_checkpoint_pisces_pc40, the
-    default, or the older results_checkpoint_gyr — with or without the
-    "results_checkpoint_" prefix) or a filesystem path to an external .pkl file.
+    `name` is either a bundled checkpoint (results_checkpoint_pisces_pc40_s5, the
+    default, or results_checkpoint_pisces_pc40 with all pair separations — with or
+    without the "results_checkpoint_" prefix) or a filesystem path to an external
+    .pkl file.
     """
     bundled = resources.files("autocontigmap.data") / f"{name}.pkl"
     if bundled.is_file():
