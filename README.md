@@ -94,41 +94,38 @@ so an errored run never prints a warning it's about to make moot.
   of the requested range can't be reached at any terminal length:
 
   ```
-  Error: res_min (181) is below the shortest buildable design (120 aa motif + 100-133 aa of gaps) -- try res_min >= 225, or >= 268 (recommended).
+  Error: res_min (200) is below the shortest buildable design (17 aa motif + 184-318 aa of gaps) -- nearest buildable length: 201 (or 199 below); or lower the lower quantile: --quantiles 0.25 0.6 builds 200.
   ```
 
-  A `res_max` below the same floor reports the same error. It is the same
-  problem: `res_min <= res_max`, so a `res_max` under the floor puts
-  `res_min` under it too, and raising `res_min` above it makes `res_max`
-  fine automatically — so only `res_min` is ever suggested.
+  A `res_max` below the same floor reports the same error — `res_min <=
+  res_max`, so a `res_max` under the floor puts `res_min` under it too.
 
-  The two values come from a scan that **re-estimates the gaps at every
-  candidate**, against the `res_max` you gave. Sequence separation grows
-  with chain length, so the `motif + gap_lo_sum` floor computed for the
-  window that just failed is not itself a usable `res_min` — raising
-  `res_min` to it re-estimates the gaps upward and moves the floor again.
-  The first value is the smallest `res_min` that builds at all; the second,
-  the recommended one, is the smallest at which the *high* end of every gap
-  estimate still fits, so it also avoids the pinned-terminal warning below.
-  If no `res_min` works at that `res_max`, the message says so instead:
+  The message offers two ways out:
 
-  ```
-  Error: res_min (130) is below the shortest buildable design (120 aa motif + 55-75 aa of gaps) -- res_min and res_max both have to be increased.
-  ```
+  - **Nearest buildable length** above and below. For a range the whole
+    window moves and keeps its width (`nearest buildable range: 192-202 (or 189-199 below)`).
+    Every candidate **re-estimates the gaps for its own window**: sequence
+    separation changes with chain length, so the `motif + gap_lo_sum` floor
+    computed for the window that just failed is not itself a usable length.
+    That also makes the answer non-monotonic — a shorter design can build
+    when a longer one does not, because the gap estimates shrink too.
+  - **A lower lower quantile** (`--quantiles`) that makes the requested
+    length build with the upper quantile kept — the highest stored one that
+    works. If none down to 0.25 does, the message says so; if you are
+    already at 0.25 there is nothing to suggest.
 
 - **Warning** (not fatal) if the lower terminal budget is negative but
   every requested length is still reachable with the gaps near their lower
   estimates — the budget is pinned to 0 and the contig is still printed:
 
   ```
-  Warning: the lower terminal budget is negative and was pinned to 0; res_min (250) is still reachable, but only when the gaps sample near their lower estimates (109 aa total). Use res_min >= 268 to avoid this.
+  Warning: the lower terminal budget is negative and was pinned to 0; res_min (250) is still reachable, but only when the gaps sample near their lower estimates (109 aa total). Nearest length without pinning: <above> (or <below> below).
   ```
 
-  The suggested `res_min` is the same value the errors above call
-  *recommended* — the smallest one at which the high end of every gap
-  estimate still fits, which is exactly the threshold between a pinned and
-  an unpinned lower budget. The tip is dropped if no `res_min` up to the
-  given `res_max` clears it.
+  The suggestion uses the same nearest-length scan as the error above, but
+  asks for the *high* end of every gap estimate to fit, which is exactly the
+  threshold between a pinned and an unpinned lower budget. The tip is
+  dropped if no length in the checkpoint range clears it.
 
 Options:
 
@@ -145,6 +142,11 @@ Options:
   - `pisces_pc40_s5` — pairs at least 5 apart in sequence, helices kept.
   - `pisces_pc40` — all pair separations.
   - or a path to an external `.pkl` file.
+- `--quantiles LOW HIGH` — which pair of checkpoint quantiles bounds each
+  gap estimate (default `0.4 0.6`). `--quantiles 0.25 0.75` gives every gap a
+  wider range, which makes a fixed design length easier to fit when many gaps
+  are summed. Available: 0.25, 0.4, 0.5, 0.6, 0.75. In the library:
+  `build_contig(..., quantiles=quantile_keys(0.25, 0.75))`.
 - `--rfd1` — output the old-style `contigmap.contigs=[...]`/`contigmap.length=...`
   form instead of the standard `"contig": ...`/`"length": ...` one.
 - `--chain-order B,A` — for motifs whose segments are split across separate
@@ -223,16 +225,15 @@ Also exported: `load_pdb`, `find_gaps_in_chain`, `ca_distances`,
 `aggregate_by_residue_range`, `lookup_gap_estimate`,
 `pooled_terminal_budget`, `split_terminal_budget`,
 `ungapped_terminal_budget`, and
-`smallest_feasible_res_min()` — the re-estimating scan behind the
-length-range suggestions above. Pass `use_high=True` for the recommended
-(upper-estimate) bound:
+and the two helpers behind the length-error suggestions above:
+`nearest_feasible_lengths()` returns `(below, above)`, the nearest
+buildable `res_min` on each side with the window width kept (`use_high=True`
+for "no pinning"), and `lower_quantile_fix()` returns `(lower_key, tried)`:
 
 ```python
-from autocontigmap import load_pickle, smallest_feasible_res_min
+from autocontigmap import load_pickle, nearest_feasible_lengths, lower_quantile_fix
 
 data = load_pickle()
-smallest_feasible_res_min(data, motif_residues=120, gap_angstroms=[40], res_max=400)
-# 225
-smallest_feasible_res_min(data, 120, [40], 400, use_high=True)
-# 268
+nearest_feasible_lengths(data, motif_residues=120, gap_angstroms=[40], res_min=181, res_max=181)
+lower_quantile_fix(data, 120, [40], 181, 181)   # ("Q0.25", True) or (None, ...)
 ```

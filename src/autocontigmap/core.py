@@ -55,6 +55,33 @@ THRESHOLD_SMOOTHING_WINDOW = 11
 
 QUANTILE_KEYS = ("Q0.25", "Q0.4", "Q0.5", "Q0.6", "Q0.75")
 
+# Which pair of checkpoint quantiles bounds a gap estimate. Q0.4-Q0.6 is the
+# narrow default; Q0.25-Q0.75 gives each gap a wider range, so a fixed design
+# length is easier to fit when many gaps are summed.
+DEFAULT_QUANTILES = ("Q0.4", "Q0.6")
+
+
+def quantile_keys(low, high):
+    """
+    ("Q<low>", "Q<high>") checkpoint keys for a lower/upper quantile given as
+    numbers (0.25) or keys ("Q0.25"). Both must be stored in the checkpoint
+    (QUANTILE_KEYS) and low must be below high.
+    """
+    def key(q):
+        if isinstance(q, str) and q.startswith("Q"):
+            q = q[1:]
+        k = f"Q{float(q):g}"
+        if k not in QUANTILE_KEYS:
+            raise ValueError(
+                f"quantile {q} is not stored in the checkpoint; choose from "
+                f"{', '.join(k[1:] for k in QUANTILE_KEYS)}."
+            )
+        return k
+    lo, hi = key(low), key(high)
+    if float(lo[1:]) >= float(hi[1:]):
+        raise ValueError(f"lower quantile ({lo[1:]}) must be below the upper one ({hi[1:]}).")
+    return lo, hi
+
 
 class GapEstimateUnavailable(Exception):
     """Raised when a gap distance has no usable estimate in the checkpoint."""
@@ -228,10 +255,10 @@ def distance_bin(gap_ang, n_dist):
     return row
 
 
-def lookup_gap_estimate(agg, gap_ang):
+def lookup_gap_estimate(agg, gap_ang, quantiles=DEFAULT_QUANTILES):
     """
     (aa_low, aa_high) residue-count estimate for a gap of `gap_ang` Å, read off
-    the aggregated Q0.4 / Q0.6 curves.
+    the aggregated curves of the two `quantiles` keys (default Q0.4 / Q0.6).
 
     Raises GapEstimateUnavailable only when no estimate exists at all: the
     distance is outside the binned range, or no chain length in the window has
@@ -239,13 +266,14 @@ def lookup_gap_estimate(agg, gap_ang):
     (check_gap_against_lengths) rejects such distances first, so this is a
     backstop rather than the usual path.
     """
-    row = distance_bin(gap_ang, len(agg["Q0.4"]))
-    q_low, q_high = agg["Q0.4"][row], agg["Q0.6"][row]
+    key_low, key_high = quantiles
+    row = distance_bin(gap_ang, len(agg[key_low]))
+    q_low, q_high = agg[key_low][row], agg[key_high][row]
 
     if np.isnan(q_low) or np.isnan(q_high):
         raise GapEstimateUnavailable(
             f"No gap estimate for a {math.floor(gap_ang):.0f} Å Cα-Cα distance in this "
-            f"design-length window: no chain length in {len(agg['Q0.4'])}-bin data has "
+            f"design-length window: no chain length in {len(agg[key_low])}-bin data has "
             f"residue pairs that far apart. Raise or widen the length range."
         )
 
@@ -363,19 +391,21 @@ def check_gap_against_lengths(gap_ang, res_min, res_max, thr_warn, thr_error):
     return _verdict(gap_ang, lengths, thr_warn[cols], GAP_SIZE_WARN_PERCENTILE, "warn")
 
 
-def estimate_gap_fill(gap_ang, res_min, res_max, checkpoint=DEFAULT_CHECKPOINT, gap_size_data=None):
+def estimate_gap_fill(gap_ang, res_min, res_max, checkpoint=DEFAULT_CHECKPOINT, gap_size_data=None,
+                      quantiles=DEFAULT_QUANTILES):
     """
     (aa_low, aa_high) residue-count estimate for a gap of gap_ang Angstrom,
     aggregated over the res_min-res_max total-protein-length range (clamped
     to the checkpoint's covered [40, 499] range). Pass a pre-loaded
     gap_size_data (from load_pickle()) to avoid re-reading the checkpoint
-    file for every call.
+    file for every call. `quantiles` picks the bounding pair of checkpoint
+    quantiles (see quantile_keys()), default Q0.4-Q0.6.
     """
     if gap_size_data is None:
         gap_size_data = load_pickle(checkpoint)
     res_min, res_max = _clamp_residue_range(res_min, res_max)
     agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
-    return lookup_gap_estimate(agg, gap_ang)
+    return lookup_gap_estimate(agg, gap_ang, quantiles)
 
 
 # ---------------------------------------------------------------------------
@@ -444,46 +474,78 @@ def ungapped_terminal_budget(aa_term_high):
     return 0, max(0, aa_term_high)
 
 
-def _gap_sums(gap_size_data, gap_angstroms, res_min, res_max):
+def _gap_sums(gap_size_data, gap_angstroms, res_min, res_max, quantiles=DEFAULT_QUANTILES):
     """(gap_lo_sum, gap_hi_sum) over every gap, estimated for a [res_min, res_max] design."""
     agg = aggregate_by_residue_range(gap_size_data, res_min, res_max)
     lo_sum = hi_sum = 0
     for gap_ang in gap_angstroms:
-        aa_low, aa_high = lookup_gap_estimate(agg, gap_ang)
+        aa_low, aa_high = lookup_gap_estimate(agg, gap_ang, quantiles)
         lo_sum += aa_low
         hi_sum += aa_high
     return lo_sum, hi_sum
 
 
-def smallest_feasible_res_min(gap_size_data, motif_residues, gap_angstroms, res_max,
-                              use_high=False):
+def _buildable(gap_size_data, motif_residues, gap_angstroms, res_min, res_max, quantiles,
+               use_high=False):
     """
-    Smallest res_min that still clears its own length check once the gaps are
-    re-estimated over [res_min, res_max].
-
-    Sequence separation grows with chain length, so the motif + gap_lo_sum floor
-    read off a failing window is NOT itself a usable res_min: raising res_min to
-    it re-estimates the gaps upward and moves the floor again. Every candidate
-    here is therefore re-estimated against its own window, which also makes the
-    answer independent of the window that happened to fail.
-
-    use_high=False gives the smallest buildable res_min (the gaps have to sample
-    near their lower estimates). use_high=True gives the smallest res_min at
-    which the high end of every gap estimate still fits, i.e. the smallest one
-    with a non-negative lower terminal budget. None if nothing up to res_max
-    qualifies.
+    True if res_min clears motif + gap_lo_sum with the gaps estimated over
+    [res_min, res_max]. use_high=True asks for motif + gap_hi_sum instead, i.e.
+    a non-negative lower terminal budget (no pinning to 0).
     """
-    for candidate in range(max(MIN_CHECKPOINT_RESIDUES, motif_residues),
-                           min(res_max, MAX_CHECKPOINT_RESIDUES) + 1):
-        try:
-            gap_lo_sum, gap_hi_sum = _gap_sums(
-                gap_size_data, gap_angstroms, candidate, res_max
-            )
-        except GapEstimateUnavailable:
-            continue
-        if motif_residues + (gap_hi_sum if use_high else gap_lo_sum) <= candidate:
-            return candidate
-    return None
+    try:
+        gap_lo_sum, gap_hi_sum = _gap_sums(gap_size_data, gap_angstroms, res_min, res_max, quantiles)
+    except GapEstimateUnavailable:
+        return False
+    return motif_residues + (gap_hi_sum if use_high else gap_lo_sum) <= res_min
+
+
+def nearest_feasible_lengths(gap_size_data, motif_residues, gap_angstroms, res_min, res_max,
+                             quantiles=DEFAULT_QUANTILES, use_high=False):
+    """
+    (below, above): the nearest buildable res_min on either side of the given
+    one, moving the whole [res_min, res_max] window and keeping its width.
+
+    Sequence separation changes with chain length, so the motif + gap_lo_sum
+    floor computed for the window that failed is not itself a usable length:
+    every candidate window is re-estimated on its own. That also makes the
+    result non-monotonic -- a shorter design can be buildable when a longer one
+    is not, since the gap estimates shrink with chain length too.
+
+    use_high=True asks for windows where the high end of every gap estimate
+    fits as well (no pinned lower terminal budget). Either side is None if no
+    window in the checkpoint range qualifies there.
+    """
+    width = res_max - res_min
+    lowest = max(MIN_CHECKPOINT_RESIDUES, motif_residues)
+    highest = MAX_CHECKPOINT_RESIDUES - width
+
+    def scan(candidates):
+        for c in candidates:
+            if _buildable(gap_size_data, motif_residues, gap_angstroms, c, c + width, quantiles,
+                          use_high):
+                return c
+        return None
+
+    return (
+        scan(range(min(res_min - 1, highest), lowest - 1, -1)),
+        scan(range(max(res_min + 1, lowest), highest + 1)),
+    )
+
+
+def lower_quantile_fix(gap_size_data, motif_residues, gap_angstroms, res_min, res_max,
+                       quantiles=DEFAULT_QUANTILES):
+    """
+    (lower_key, tried): the highest stored lower quantile, below quantiles[0],
+    that makes res_min buildable with the upper quantile unchanged. lower_key is
+    None if none does; tried is False if quantiles[0] is already the lowest
+    stored quantile, so there was nothing to try.
+    """
+    lower = [k for k in QUANTILE_KEYS if float(k[1:]) < float(quantiles[0][1:])]
+    for key in sorted(lower, key=lambda k: float(k[1:]), reverse=True):
+        if _buildable(gap_size_data, motif_residues, gap_angstroms, res_min, res_max,
+                      (key, quantiles[1])):
+            return key, True
+    return None, bool(lower)
 
 
 # ---------------------------------------------------------------------------

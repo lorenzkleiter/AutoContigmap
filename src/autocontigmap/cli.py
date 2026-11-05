@@ -5,6 +5,7 @@ autocontigmap — CLI for motif gap estimation.
 Usage
 -----
 autocontigmap <pdb_file> <res_min> [res_max] [--pickle-file NAME_OR_PATH]
+              [--quantiles LOW HIGH]
 
 Arguments
 ---------
@@ -114,8 +115,10 @@ from Bio.PDB import Selection
 
 from .core import (
     DEFAULT_CHECKPOINT,
+    DEFAULT_QUANTILES,
     MIN_CHECKPOINT_RESIDUES,
     MAX_CHECKPOINT_RESIDUES,
+    QUANTILE_KEYS,
     GAP_SIZE_ERROR_PERCENTILE,
     GAP_SIZE_WARN_PERCENTILE,
     GapEstimateUnavailable,
@@ -128,7 +131,9 @@ from .core import (
     load_pickle,
     lookup_gap_estimate,
     pooled_terminal_budget,
-    smallest_feasible_res_min,
+    quantile_keys,
+    lower_quantile_fix,
+    nearest_feasible_lengths,
     split_terminal_budget,
     ungapped_terminal_budget,
 )
@@ -188,24 +193,69 @@ def term_token(lo, hi):
     return str(lo) if lo == hi else f"{lo}-{hi}"
 
 
-def _range_advice(minimal, recommended):
-    """
-    Closing clause of a length-range error: the smallest res_min that works, and
-    the larger one that also clears the high end of the gap estimates.
+def _window(start, width):
+    return str(start) if width == 0 else f"{start}-{start + width}"
 
-    Both come from a re-estimating scan (see core.smallest_feasible_res_min),
-    not from the floor computed for the window that just failed -- that floor
-    moves as soon as res_min does, so quoting it back is bad advice.
+
+def _nearest_text(gap_size_data, motif_residues, gap_angstroms, res_min, res_max, quantiles,
+                  use_high=False):
     """
-    if minimal is None:
-        return " -- res_min and res_max both have to be increased."
-    if recommended is None or recommended <= minimal:
-        return f" -- try res_min >= {minimal}."
-    return f" -- try res_min >= {minimal}, or >= {recommended} (recommended)."
+    "201 (or 199 below)" -- the nearest qualifying length (window, for a range)
+    above and below, from core.nearest_feasible_lengths. None if neither exists.
+    """
+    width = res_max - res_min
+    below, above = nearest_feasible_lengths(
+        gap_size_data, motif_residues, gap_angstroms, res_min, res_max, quantiles, use_high,
+    )
+    if above is not None and below is not None:
+        return f"{_window(above, width)} (or {_window(below, width)} below)"
+    if above is not None or below is not None:
+        return _window(above if above is not None else below, width)
+    return None
+
+
+def _length_advice(gap_size_data, motif_residues, gap_angstroms, res_min, res_max, quantiles):
+    """
+    Closing clause of a length-range error, offering two ways out: the nearest
+    buildable length (the whole window moved, width kept) and the lower
+    quantile that makes the requested one build with the upper quantile kept.
+
+    Both re-estimate the gaps for what they suggest (see core), not reuse the
+    floor computed for the window that just failed -- that floor moves as soon
+    as the length does, so quoting it back is bad advice.
+    """
+    width = res_max - res_min
+    what = "length" if width == 0 else "range"
+    requested = _window(res_min, width)
+    parts = []
+
+    nearest = _nearest_text(
+        gap_size_data, motif_residues, gap_angstroms, res_min, res_max, quantiles,
+    )
+    parts.append(
+        f"nearest buildable {what}: {nearest}" if nearest is not None
+        else f"no buildable {what} with these quantiles"
+    )
+
+    key, tried = lower_quantile_fix(
+        gap_size_data, motif_residues, gap_angstroms, res_min, res_max, quantiles,
+    )
+    if key is not None:
+        parts.append(
+            f"or lower the lower quantile: --quantiles {key[1:]} {quantiles[1][1:]} "
+            f"builds {requested}"
+        )
+    elif tried:
+        parts.append(
+            f"lowering the lower quantile (down to {QUANTILE_KEYS[0][1:]}) "
+            f"does not make {requested} buildable either"
+        )
+    return " -- " + "; ".join(parts) + "."
 
 
 def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
-                      n_segments=1, gap_size_data=None, gap_angstroms=()):
+                      n_segments=1, gap_size_data=None, gap_angstroms=(),
+                      quantiles=DEFAULT_QUANTILES):
     """
     Per-terminal (term_lo, term_hi) from the pooled permissive budget in core.
 
@@ -227,17 +277,10 @@ def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
     )
     if status in ("infeasible", "unreachable_min"):
         # One problem, not two. res_min <= res_max, so a res_max below the floor
-        # ("infeasible") puts res_min below it too, and clearing res_min makes
-        # res_max >= res_min >= floor automatic. Only res_min is worth scanning:
-        # advising a bigger res_max would just hand back a range that fails the
-        # other check on the next run.
-        advice = _range_advice(
-            smallest_feasible_res_min(
-                gap_size_data, motif_residues, gap_angstroms, res_max
-            ),
-            smallest_feasible_res_min(
-                gap_size_data, motif_residues, gap_angstroms, res_max, use_high=True
-            ),
+        # ("infeasible") puts res_min below it too; the advice moves the whole
+        # window, so it fixes both at once.
+        advice = _length_advice(
+            gap_size_data, motif_residues, gap_angstroms, res_min, res_max, quantiles,
         )
         raise LengthRangeError(
             f"res_min ({res_min}) is below the shortest buildable design "
@@ -245,16 +288,16 @@ def resolve_terminals(motif_residues, gap_lo_sum, gap_hi_sum, res_min, res_max,
             f"{advice}"
         )
     if status == "clamped":
-        # The res_min that would make this "ok" is the same quantity the error
-        # messages call "recommended": the smallest one whose own gap estimates
-        # still fit at their high end. None when no res_min up to res_max does.
+        # The nearest length (window) whose own gap estimates still fit at their
+        # high end, i.e. where nothing has to be pinned. None if there is none.
         comfortable = (
             None if gap_size_data is None
-            else smallest_feasible_res_min(
-                gap_size_data, motif_residues, gap_angstroms, res_max, use_high=True
+            else _nearest_text(
+                gap_size_data, motif_residues, gap_angstroms, res_min, res_max, quantiles,
+                use_high=True,
             )
         )
-        tip = "" if comfortable is None else f" Use res_min >= {comfortable} to avoid this."
+        tip = "" if comfortable is None else f" Nearest length without pinning: {comfortable}."
         print(
             f"  Warning: the lower terminal budget is negative and was pinned to 0; "
             f"res_min ({res_min}) is still reachable, but only when the gaps sample near "
@@ -325,11 +368,11 @@ def check_gap_size(label, gap_ang, thresholds, res_min, res_max):
     print(f"  Warning: {message}", file=sys.stderr)
 
 
-def _estimate(agg, gap_ang, label, res_min, res_max, thresholds):
+def _estimate(agg, gap_ang, label, res_min, res_max, thresholds, quantiles=DEFAULT_QUANTILES):
     """Check the distance is plausible for every length in the window, then look it up."""
     check_gap_size(label, gap_ang, thresholds, res_min, res_max)
     try:
-        aa_low, aa_high = lookup_gap_estimate(agg, gap_ang)
+        aa_low, aa_high = lookup_gap_estimate(agg, gap_ang, quantiles)
     except GapEstimateUnavailable as e:
         raise GapDataError(f"gap {label}: {e}") from e
     print(
@@ -339,7 +382,8 @@ def _estimate(agg, gap_ang, label, res_min, res_max, thresholds):
     return aa_low, aa_high
 
 
-def _chain_gap_estimates(chain, gaps, res_min, res_max, agg, thresholds):
+def _chain_gap_estimates(chain, gaps, res_min, res_max, agg, thresholds,
+                         quantiles=DEFAULT_QUANTILES):
     """
     Per-gap (aa_low, aa_high, prev_resnum, curr_resnum) for one chain's internal
     gaps, plus the raw Cα-Cα distances they were estimated from.
@@ -351,7 +395,7 @@ def _chain_gap_estimates(chain, gaps, res_min, res_max, agg, thresholds):
     for (i_prev, i_curr, prev_resnum, curr_resnum) in gaps:
         gap_ang = math.floor(distances[i_prev][i_curr])
         label = f"{cid}{prev_resnum}-{curr_resnum}"
-        aa_low, aa_high = _estimate(agg, gap_ang, label, res_min, res_max, thresholds)
+        aa_low, aa_high = _estimate(agg, gap_ang, label, res_min, res_max, thresholds, quantiles)
         estimates.append((aa_low, aa_high, prev_resnum, curr_resnum))
         angstroms.append(gap_ang)
     return estimates, angstroms
@@ -378,13 +422,14 @@ def _gapped_chain_parts(chain, gap_estimates, term_lo, term_hi, sep):
     return sep.join(parts)
 
 
-def _chain_order_estimates(chains, chain_ids, res_min, res_max, agg, thresholds):
+def _chain_order_estimates(chains, chain_ids, res_min, res_max, agg, thresholds,
+                           quantiles=DEFAULT_QUANTILES):
     """Per-gap (aa_low, aa_high) between consecutive chains, plus their Cα-Cα distances."""
     estimates, angstroms = [], []
     for i in range(len(chains) - 1):
         gap_ang = math.floor(interchain_gap_distance(chains[i], chains[i + 1]))
         label = f"{chain_ids[i]}(last)-{chain_ids[i + 1]}(first)"
-        estimates.append(_estimate(agg, gap_ang, label, res_min, res_max, thresholds))
+        estimates.append(_estimate(agg, gap_ang, label, res_min, res_max, thresholds, quantiles))
         angstroms.append(gap_ang)
     return estimates, angstroms
 
@@ -411,12 +456,14 @@ def n_motif_residues(chains):
     return sum(len(Selection.unfold_entities(c, "R")) for c in chains)
 
 
-def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, sep=","):
+def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, sep=",",
+                 quantiles=DEFAULT_QUANTILES):
     """
     Assemble the full contig body (without the surrounding "contigmap.contigs=[...]"
     or '"contig": "..."' wrapper): one designed/fixed segment per output
     chain, joined by a hard chain break ("/0 "). `sep` is the intra-chain
-    separator: "," for the standard style, "/" for --rfd1.
+    separator: "," for the standard style, "/" for --rfd1. `quantiles` is the
+    pair of checkpoint keys bounding each gap estimate (core.quantile_keys()).
 
     res_min/res_max are whole-design lengths, so the motif count and the terminal
     budget are pooled over EVERY designed segment and only then split back over
@@ -447,7 +494,7 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, s
         check_motif_fits(motif_residues, res_min)
 
         gap_estimates, gap_angstroms = _chain_order_estimates(
-            ordered_chains, chain_ids, res_min, res_max, agg, thresholds
+            ordered_chains, chain_ids, res_min, res_max, agg, thresholds, quantiles
         )
         print(file=sys.stderr)
 
@@ -457,6 +504,7 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, s
             sum(hi for _, hi in gap_estimates),
             res_min, res_max, n_segments=1,
             gap_size_data=gap_size_data, gap_angstroms=gap_angstroms,
+            quantiles=quantiles,
         )
         motif_segment = _chain_order_parts(
             ordered_chains, gap_estimates, term_lo, term_hi, sep
@@ -494,7 +542,7 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, s
     for chain in designed:
         cid = chain.get_id()
         estimates, angstroms = _chain_gap_estimates(
-            chain, gaps_by_id[cid], res_min, res_max, agg, thresholds
+            chain, gaps_by_id[cid], res_min, res_max, agg, thresholds, quantiles
         )
         estimates_by_id[cid] = estimates
         gap_angstroms.extend(angstroms)
@@ -507,6 +555,7 @@ def build_contig(structure, res_min, res_max, gap_size_data, chain_order=None, s
         sum(hi for lo, hi, *_ in all_estimates),
         res_min, res_max, n_segments=len(designed),
         gap_size_data=gap_size_data, gap_angstroms=gap_angstroms,
+        quantiles=quantiles,
     )
 
     groups = []
@@ -565,7 +614,22 @@ def main():
             "the last residue of each chain and the first residue of the next."
         ),
     )
+    parser.add_argument(
+        "--quantiles", nargs=2, metavar=("LOW", "HIGH"), default=None,
+        help=(
+            "Lower and upper checkpoint quantile bounding each gap estimate "
+            "(default: 0.4 0.6). E.g. '--quantiles 0.25 0.75' gives wider gap "
+            "ranges, which makes a fixed design length easier to fit. Available: "
+            "0.25, 0.4, 0.5, 0.6, 0.75."
+        ),
+    )
     args = parser.parse_args()
+
+    try:
+        quantiles = quantile_keys(*args.quantiles) if args.quantiles else DEFAULT_QUANTILES
+    except ValueError as e:
+        print(f"Error: --quantiles: {e}", file=sys.stderr)
+        sys.exit(1)
 
     if not Path(args.pdb_file).exists():
         print(f"Error: pdb_file not found: {args.pdb_file}", file=sys.stderr)
@@ -594,6 +658,7 @@ def main():
         body = build_contig(
             structure, args.res_min, res_max, gap_size_data,
             chain_order=args.chain_order, sep="/" if args.rfd1 else ",",
+            quantiles=quantiles,
         )
     except AutoContigmapError as e:
         print(f"Error: {e}", file=sys.stderr)

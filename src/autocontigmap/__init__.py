@@ -1,6 +1,7 @@
 from .core import (
     CHECKPOINT_COLUMN_OFFSET,
     DEFAULT_CHECKPOINT,
+    DEFAULT_QUANTILES,
     MIN_CHECKPOINT_RESIDUES,
     MAX_CHECKPOINT_RESIDUES,
     GAP_SIZE_WARN_PERCENTILE,
@@ -16,8 +17,10 @@ from .core import (
     load_pdb,
     load_pickle,
     lookup_gap_estimate,
+    lower_quantile_fix,
+    nearest_feasible_lengths,
     pooled_terminal_budget,
-    smallest_feasible_res_min,
+    quantile_keys,
     split_terminal_budget,
     ungapped_terminal_budget,
 )
@@ -27,6 +30,7 @@ __version__ = "0.4.0"
 __all__ = [
     "CHECKPOINT_COLUMN_OFFSET",
     "DEFAULT_CHECKPOINT",
+    "DEFAULT_QUANTILES",
     "MIN_CHECKPOINT_RESIDUES",
     "MAX_CHECKPOINT_RESIDUES",
     "GAP_SIZE_WARN_PERCENTILE",
@@ -42,8 +46,10 @@ __all__ = [
     "load_pdb",
     "load_pickle",
     "lookup_gap_estimate",
+    "lower_quantile_fix",
+    "nearest_feasible_lengths",
     "pooled_terminal_budget",
-    "smallest_feasible_res_min",
+    "quantile_keys",
     "split_terminal_budget",
     "ungapped_terminal_budget",
 ]
