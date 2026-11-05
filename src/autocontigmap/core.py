@@ -24,7 +24,9 @@ from Bio.PDB.ic_rebuild import structure_rebuild_test
 
 # Only residue pairs at least 5 apart in sequence: a gap lies between motif
 # segments, and residues 1-4 apart would sit inside one segment instead.
-DEFAULT_CHECKPOINT = "results_checkpoint_pisces_pc40_s5"
+# Pairs whose whole stretch lies inside one continuous alpha-helix are dropped
+# too: they pile up as i->i+5..i+8 at 8-11 A and pull the quantiles down there.
+DEFAULT_CHECKPOINT = "results_checkpoint_pisces_pc40_s5_nohelix"
 # Checkpoint layout: column 0 holds chain length 10, so column = length - 10.
 # This is fixed by the matrices and independent of which lengths are usable.
 CHECKPOINT_COLUMN_OFFSET = 10
@@ -67,10 +69,11 @@ def load_pickle(name: str = DEFAULT_CHECKPOINT):
     """
     Load a residue-count-vs-Cα-distance checkpoint dataset.
 
-    `name` is either a bundled checkpoint (results_checkpoint_pisces_pc40_s5, the
-    default, or results_checkpoint_pisces_pc40 with all pair separations — with or
-    without the "results_checkpoint_" prefix) or a filesystem path to an external
-    .pkl file.
+    `name` is either a bundled checkpoint — results_checkpoint_pisces_pc40_s5_nohelix
+    (the default: pair separation >= 5, minus pairs lying within one continuous
+    alpha-helix), results_checkpoint_pisces_pc40_s5 (separation >= 5 only) or
+    results_checkpoint_pisces_pc40 (all pair separations), with or without the
+    "results_checkpoint_" prefix — or a filesystem path to an external .pkl file.
     """
     bundled = resources.files("autocontigmap.data") / f"{name}.pkl"
     if bundled.is_file():

@@ -132,12 +132,19 @@ so an errored run never prints a warning it's about to make moot.
 
 Options:
 
-- `--pickle-file NAME_OR_PATH` — which statistics checkpoint to use: the
-  bundled `pisces_pc40_s5` variant (default; non-redundant PISCES chains at 40%
-  sequence identity, X-ray, <= 3.0 A, counting only residue pairs at least 5
-  apart in sequence, i.e. gaps between motif segments rather than residues
-  within one segment), `pisces_pc40` (the same chains with all pair
-  separations), or a path to an external `.pkl` file.
+- `--pickle-file NAME_OR_PATH` — which statistics checkpoint to use. All
+  bundled variants come from non-redundant PISCES chains (40% sequence
+  identity, X-ray, <= 3.0 A):
+  - `pisces_pc40_s5_nohelix` (default) — residue pairs at least 5 apart in
+    sequence (gaps between motif segments rather than residues within one
+    segment), minus pairs whose whole stretch lies in one continuous
+    alpha-helix (flagged from Calpha distances: d(i,i+3) 4.6-5.8 A and
+    d(i,i+4) 5.6-6.8 A). Without this, intra-helix i->i+5..i+8 pairs pile up
+    at 8-11 A and pull the gap estimates there down by up to ~9 residues.
+    Quantiles are pooled over all chains.
+  - `pisces_pc40_s5` — pairs at least 5 apart in sequence, helices kept.
+  - `pisces_pc40` — all pair separations.
+  - or a path to an external `.pkl` file.
 - `--rfd1` — output the old-style `contigmap.contigs=[...]`/`contigmap.length=...`
   form instead of the standard `"contig": ...`/`"length": ...` one.
 - `--chain-order B,A` — for motifs whose segments are split across separate
